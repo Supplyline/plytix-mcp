@@ -1,0 +1,23 @@
+{
+  "name": "plytix-mcp-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Minimal MCP server for Plytix PIM (v2) over stdio with products.get and products.search",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.1.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.6.3"
+  }
+}
