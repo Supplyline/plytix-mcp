@@ -21,7 +21,7 @@ export class PlytixClient {
   private async getToken(): Promise<string> {
     const now = Date.now();
     // 60s skew
-    if (this.token && now < this.tokenExp - 60_000) return this.token;
+    if (this.token && now < this.tokenExp - 60_000) return this.token!;
 
     const r = await fetch(this.authUrl, {
       method: "POST",
@@ -38,7 +38,7 @@ export class PlytixClient {
     this.token = newToken;
     // Official TTL is ~15 minutes; cache for ~14 minutes.
     this.tokenExp = now + 14 * 60_000;
-    return this.token;
+    return this.token!;
   }
 
   async call<T = unknown>(path: string, init: FetchInit = {}): Promise<T> {
