@@ -1,4 +1,3 @@
-
 # plytix-mcp-server
 
 Minimal **MCP server** (stdio) that authenticates to **Plytix PIM** and exposes two tools out of the box:
