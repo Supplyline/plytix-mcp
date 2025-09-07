@@ -3,6 +3,16 @@ import 'dotenv/config';
 
 type FetchInit = RequestInit & { retry?: boolean };
 
+export interface PlytixProduct {
+  id: string;
+  sku?: string;
+  attributes?: Record<string, any>;
+  replaces?: string[];
+  includes?: string[];
+  modules?: string[];
+  has_optional_accessory?: string[];
+}
+
 export class PlytixClient {
   private token: string | null = null;
   private tokenExp = 0;
@@ -73,5 +83,28 @@ export class PlytixClient {
       // Fallback for non-json bodies (unlikely here)
       return (await r.text()) as unknown as T;
     }
+  }
+
+  async getProductById(id: string): Promise<PlytixProduct> {
+    return this.call(`/api/v2/products/${encodeURIComponent(id)}`);
+  }
+
+  async getProductsByIds(ids: string[]): Promise<PlytixProduct[]> {
+    const unique = Array.from(new Set(ids));
+    return Promise.all(unique.map((id) => this.getProductById(id)));
+  }
+
+  async getProductBySku(sku: string): Promise<PlytixProduct | null> {
+    try {
+      return await this.call(`/api/v2/products/sku/${encodeURIComponent(sku)}`);
+    } catch {
+      return null;
+    }
+  }
+
+  async getProductsBySkus(skus: string[]): Promise<PlytixProduct[]> {
+    const unique = Array.from(new Set(skus));
+    const results = await Promise.all(unique.map((s) => this.getProductBySku(s)));
+    return results.filter((p): p is PlytixProduct => !!p);
   }
 }

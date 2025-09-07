@@ -91,21 +91,69 @@ npm run test:all
 ## Available Tools
 
 ### products.get
-Fetch a single product by its ID.
+Fetch a single product by its ID. Supports optional relationship and hierarchy hydration.
 
 **Input:**
 ```json
 {
-  "product_id": "your-product-id-here"
+  "id": "your-product-id-here",
+  "resolve": "hierarchy", // "none" (default), "relationships", "hierarchy", or "all"
+  "relationshipFilter": ["includes", "replaces"], // optional
+  "hierarchyFilter": ["variant", "parent", "family"], // optional
+  "includeBrand": false // optional
 }
 ```
 
-**Example:**
+**Resolving relationships**
+
+When `resolve` is set to `"relationships"`, supported relationship fields (`replaces`, `includes`, `modules`, `has_optional_accessory`) are replaced with lightweight product objects:
+
+```jsonc
+{
+  "id": "P123",
+  "includes": [
+    { "id": "P200", "sku": "KIT-200", "mpn": "200-MPN", "label": "Parts Kit 200", "listPrice": 149.99 },
+    { "id": "P201", "sku": null, "mpn": null, "label": "Accessory", "listPrice": null }
+  ],
+  "replaces": [
+    { "id": "P099", "sku": "OLD-099", "mpn": "099-MPN", "label": "Legacy Pump", "listPrice": 999 }
+  ],
+  "modules": [],
+  "has_optional_accessory": []
+}
+
+To hydrate only specific relationships:
+
 ```json
 {
-  "product_id": "64f8a1b2c3d4e5f6a7b8c9d0"
+  "tool": "products.get",
+  "args": {
+    "id": "P123",
+    "resolve": "relationships",
+    "relationshipFilter": ["includes", "replaces"]
+  }
 }
 ```
+
+**Hierarchy hydration (variant → parent → family)**
+
+When `resolve` is set to `"hierarchy"` (or `"all"`), a `hierarchy` object is added with the product's level and hydrated references:
+
+```jsonc
+{
+  "id": "PROD-123",
+  "hierarchy": {
+    "level": 4,
+    "variant": { "id": "VAR", "sku": "LMI-PD12-220-BASE", "mpn": "BASE", "label": "Variant", "listPrice": 123 },
+    "parent": { "id": "PAR", "sku": "LMI-PD12-220", "mpn": "PD12-220", "label": "Parent", "listPrice": 999 },
+    "family": { "id": "FAM", "sku": "LMI-PD12", "mpn": "LMI-PD12", "label": "LMI-PD12", "listPrice": 0 }
+  }
+}
+```
+
+Control which levels to hydrate with `hierarchyFilter` (default `["variant","parent","family"]`). Set `includeBrand: true` to also fetch the brand when a pointer exists.
+
+By default, family references are inferred from the product SKU using `FAMILY_SKU_REGEX`; there is no dedicated family-SKU attribute.
 
 ### products.search
 Search products with filters, pagination, and attribute selection.
@@ -173,6 +221,17 @@ List all variants (size, color, etc.) for a product.
 | `PLYTIX_API_PASSWORD` | ✅ | - | Your Plytix API password |
 | `PLYTIX_API_BASE` | ❌ | `https://pim.plytix.com` | Plytix API base URL |
 | `PLYTIX_AUTH_URL` | ❌ | `https://auth.plytix.com/auth/api/get-token` | Authentication endpoint |
+| `PLYTIX_MPN_ATTR_SLUG` | ❌ | `mpn` | Attribute slug used for MPN |
+| `PLYTIX_LABEL_ATTR_SLUG` | ❌ | `name` | Attribute slug used for product label |
+| `PLYTIX_LIST_PRICE_ATTR_SLUG` | ❌ | `list_price` | Attribute slug used for list price |
+| `SKU_LEVEL_ATTR_SLUG` | ❌ | `sku_level` | Attribute slug used for SKU level |
+| `FAMILY_SKU_ATTR_SLUG` | ❌ | - | Attribute slug pointing to family SKU (if using an attribute; otherwise regex fallback is used) |
+| `PARENT_SKU_ATTR_SLUG` | ❌ | `parent_sku` | Attribute slug pointing to parent SKU |
+| `VARIANT_SKU_ATTR_SLUG` | ❌ | `variant_sku` | Attribute slug pointing to variant SKU |
+| `BRAND_SKU_ATTR_SLUG` | ❌ | `brand_sku` | Attribute slug pointing to brand SKU |
+| `FAMILY_SKU_REGEX` | ❌ | `^([^-]+-[^-]+)` | Regex fallback for deriving family SKU |
+| `PARENT_SKU_REGEX` | ❌ | `^(.*?)-[^-]+$` | Regex fallback for deriving parent SKU |
+| `VARIANT_SKU_REGEX` | ❌ | `^(.*?)-[^-]+$` | Regex fallback for deriving variant SKU |
 
 ### Example .env file
 
@@ -188,13 +247,14 @@ PLYTIX_API_PASSWORD=your_api_password_here
 
 ### Scripts
 
-- `npm run dev` - Start development server with hot reload
-- `npm run build` - Build TypeScript to JavaScript
-- `npm start` - Start production server
-- `npm test` - Run integration tests
-- `npm run test:mcp` - Test MCP protocol handshake
-- `npm run test:all` - Run all tests
-- `npm run typecheck` - Type check without building
+  - `npm run dev` - Start development server with hot reload
+  - `npm run build` - Build TypeScript to JavaScript
+  - `npm start` - Start production server
+  - `npm test` - Run unit tests
+  - `npm run test:integration` - Run integration tests
+  - `npm run test:mcp` - Test MCP protocol handshake
+  - `npm run test:all` - Run all tests
+  - `npm run typecheck` - Type check without building
 
 ### Architecture
 
