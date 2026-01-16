@@ -1,6 +1,6 @@
 {
   "name": "plytix-mcp-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "MCP server for Plytix PIM API integration. Enables AI assistants to read, write, and manage product data, assets, categories, and relationships.",
   "keywords": [

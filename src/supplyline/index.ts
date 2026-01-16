@@ -6,19 +6,21 @@
  * particular use cases.
  *
  * Generic Plytix tools live in ../tools/
- * Supplyline-specific tools live in ./tools/
+ * Supplyline-specific tools live here
+ *
+ * Current modules:
+ * - sync/ - Channel export parsing and Supabase sync tools
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PlytixClient } from "../client.js";
+import { registerSyncTools } from "./sync/index.js";
 
 /**
  * Register all Supplyline-specific tools with the MCP server.
  * Call this after registering the generic tools.
  */
 export function registerSupplylineTools(server: McpServer, client: PlytixClient): void {
-  // Add Supplyline-specific tool registrations here
-  // Example:
-  // registerSupplylineProductTools(server, client);
-  // registerSupplylineWorkflowTools(server, client);
+  // Sync tools for Channel export and Supabase integration
+  registerSyncTools(server, client);
 }
