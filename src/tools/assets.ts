@@ -1,12 +1,12 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { PlytixClient } from "../plytixClient.js";
+import type { PlytixClient } from '../client.js';
 
 export function registerAssetTools(server: McpServer, client: PlytixClient) {
   // LIST product assets
   server.registerTool(
-    "assets.list",
+    "assets_list",
     {
       title: "List Assets",
       description: "List assets linked to a product (Plytix v2)",
@@ -16,9 +16,9 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
     },
     async ({ product_id }) => {
       try {
-        const data = await client.call(`/api/v2/products/${encodeURIComponent(product_id)}/assets`);
-        return { 
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }] 
+        const result = await client.getProductAssets(product_id);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
         };
       } catch (error) {
         return {

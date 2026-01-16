@@ -1,12 +1,12 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { PlytixClient } from "../plytixClient.js";
+import type { PlytixClient } from '../client.js';
 
 export function registerCategoryTools(server: McpServer, client: PlytixClient) {
   // LIST product categories
   server.registerTool(
-    "categories.list",
+    "categories_list",
     {
       title: "List Categories",
       description: "List categories linked to a product (Plytix v2)",
@@ -16,9 +16,9 @@ export function registerCategoryTools(server: McpServer, client: PlytixClient) {
     },
     async ({ product_id }) => {
       try {
-        const data = await client.call(`/api/v2/products/${encodeURIComponent(product_id)}/categories`);
-        return { 
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }] 
+        const result = await client.getProductCategories(product_id);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
         };
       } catch (error) {
         return {

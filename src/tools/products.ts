@@ -1,69 +1,283 @@
+/**
+ * Product Tools
+ *
+ * Tools for searching, retrieving, and looking up products.
+ * Includes smart lookup with automatic identifier detection.
+ */
 
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { PlytixClient } from "../plytixClient.js";
+import { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PlytixClient } from '../client.js';
+import { PlytixLookup } from '../lookup/index.js';
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
-  // GET product
+  // Create lookup instance for smart search
+  const lookup = new PlytixLookup(client);
+
+  // ─────────────────────────────────────────────────────────────
+  // products.lookup - Smart identifier-based lookup
+  // ─────────────────────────────────────────────────────────────
+
   server.registerTool(
-    "products.get",
+    'products_lookup',
     {
-      title: "Get Product",
-      description: "Get a single product by product_id (Plytix v2)",
+      title: 'Smart Product Lookup',
+      description:
+        'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
+        'Uses staged search strategies with confidence scoring. ' +
+        'Returns the best match along with the search plan used. ' +
+        'Includes overwritten_attributes to show which values are inherited vs explicitly set.',
       inputSchema: {
-        product_id: z.string().min(1).describe("The product ID to fetch")
-      }
+        identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
+        type: z
+          .enum(['id', 'sku', 'mpn', 'mno', 'gtin', 'label'])
+          .optional()
+          .describe('Explicit identifier type (auto-detected if not provided)'),
+        limit: z.number().int().positive().max(20).default(5).describe('Max results to return'),
+      },
     },
-    async ({ product_id }) => {
+    async ({ identifier, type, limit }) => {
       try {
-        const data = await client.call(`/api/v2/products/${encodeURIComponent(product_id)}`);
+        const result = await lookup.findByIdentifier(identifier, type, limit);
+
+        // If we have a selected match, fetch full product details
+        let fullProduct = null;
+        if (result.selected) {
+          try {
+            const productResult = await client.getProduct(result.selected.id);
+            fullProduct = productResult.data?.[0] ?? null;
+          } catch {
+            // Use the raw data from search if full fetch fails
+            fullProduct = result.selected.raw;
+          }
+        }
+
         return {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  selected: result.selected
+                    ? {
+                        id: result.selected.id,
+                        sku: result.selected.sku,
+                        label: result.selected.label,
+                        confidence: result.selected.confidence,
+                        reason: result.selected.reason,
+                        matchedField: result.selected.matchedField,
+                      }
+                    : null,
+                  product: fullProduct,
+                  alternativeMatches: result.matches.slice(1, 5).map((m) => ({
+                    id: m.id,
+                    sku: m.sku,
+                    label: m.label,
+                    confidence: m.confidence,
+                  })),
+                  searchPlan: result.plan,
+                },
+                null,
+                2
+              ),
+            },
+          ],
         };
       } catch (error) {
         return {
-          content: [{ 
-            type: "text", 
-            text: `Error fetching product: ${error instanceof Error ? error.message : 'Unknown error'}` 
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `Error looking up product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
           isError: true,
         };
       }
     }
   );
 
-  // SEARCH products
+  // ─────────────────────────────────────────────────────────────
+  // products.get - Fetch single product by ID
+  // ─────────────────────────────────────────────────────────────
+
   server.registerTool(
-    "products.search",
+    'products_get',
     {
-      title: "Search Products",
-      description: "Search products (Plytix v2). Pass-through body for v2 search API.",
+      title: 'Get Product',
+      description:
+        'Get a single product by ID. Returns full product data including ' +
+        'overwritten_attributes (attributes explicitly set, not inherited from family), ' +
+        'product_family_id, and product_type (PARENT/VARIANT/STANDALONE).',
       inputSchema: {
-        attributes: z.array(z.string()).optional().describe("List of attributes to return (max 50)"),
-        filters: z.array(z.any()).optional().describe("Search filters"),
-        pagination: z.object({
-          page: z.number().int().positive().default(1),
-          page_size: z.number().int().positive().max(100).default(25)
-        }).optional(),
-        sort: z.any().optional().describe("Sorting options")
-      }
+        product_id: z.string().min(1).describe('The product ID to fetch'),
+      },
     },
-    async (args) => {
+    async ({ product_id }) => {
       try {
-        // NOTE: v2 allows up to 50 attributes and expects custom attrs prefixed with 'attributes.'
-        const data = await client.call(`/api/v2/products/search`, {
-          method: "POST",
-          body: JSON.stringify(args),
-        });
+        const result = await client.getProduct(product_id);
+
+        if (!result.data?.[0]) {
+          return {
+            content: [{ type: 'text', text: `Product not found: ${product_id}` }],
+            isError: true,
+          };
+        }
+
         return {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
         };
       } catch (error) {
         return {
-          content: [{ 
-            type: "text", 
-            text: `Error searching products: ${error instanceof Error ? error.message : 'Unknown error'}` 
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.search - Advanced search with filters
+  // ─────────────────────────────────────────────────────────────
+
+  server.registerTool(
+    'products_search',
+    {
+      title: 'Search Products',
+      description:
+        'Search products with filters, pagination, and sorting. ' +
+        'Use attributes.filters tool to discover available filter fields. ' +
+        'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+      inputSchema: {
+        attributes: z
+          .array(z.string())
+          .optional()
+          .describe('List of attributes to return (max 50). Custom attrs need "attributes." prefix.'),
+        filters: z
+          .array(z.any())
+          .optional()
+          .describe(
+            'Search filters. Each filter is an array of conditions (OR within, AND between). ' +
+              'Format: [[{field, operator, value}], [{field, operator, value}]]'
+          ),
+        pagination: z
+          .object({
+            page: z.number().int().positive().default(1),
+            page_size: z.number().int().positive().max(100).default(25),
+          })
+          .optional(),
+        sort: z.any().optional().describe('Sorting options'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await client.searchProducts(args);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  products: result.data,
+                  pagination: result.pagination,
+                  attributes_returned: result.attributes,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error searching products: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.find - Multi-criteria search
+  // ─────────────────────────────────────────────────────────────
+
+  server.registerTool(
+    'products_find',
+    {
+      title: 'Find Products',
+      description:
+        'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
+        'Simpler than products.search - just specify the fields you know.',
+      inputSchema: {
+        sku: z.string().optional().describe('Exact SKU match'),
+        mpn: z.string().optional().describe('Manufacturer part number'),
+        mno: z.string().optional().describe('Model number'),
+        gtin: z.string().optional().describe('GTIN/UPC/EAN'),
+        label: z.string().optional().describe('Product label (partial match)'),
+        fuzzy_search: z.string().optional().describe('Fuzzy text search across all fields'),
+        limit: z.number().int().positive().max(50).default(10).describe('Max results'),
+      },
+    },
+    async ({ sku, mpn, mno, gtin, label, fuzzy_search, limit }) => {
+      try {
+        const result = await lookup.findProducts({
+          sku,
+          mpn,
+          mno,
+          gtin,
+          label,
+          fuzzySearch: fuzzy_search,
+          limit,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  selected: result.selected
+                    ? {
+                        id: result.selected.id,
+                        sku: result.selected.sku,
+                        label: result.selected.label,
+                        confidence: result.selected.confidence,
+                      }
+                    : null,
+                  matches: result.matches.map((m) => ({
+                    id: m.id,
+                    sku: m.sku,
+                    label: m.label,
+                    confidence: m.confidence,
+                  })),
+                  count: result.matches.length,
+                  searchPlan: result.plan,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error finding products: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
           isError: true,
         };
       }

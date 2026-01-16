@@ -10,7 +10,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { PlytixClient } from "../plytixClient.js";
+import type { PlytixClient } from "../client.js";
 
 /**
  * Register all Supplyline-specific tools with the MCP server.
