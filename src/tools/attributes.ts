@@ -2,7 +2,7 @@
  * Attribute Tools
  *
  * Tools for discovering and listing product attributes.
- * Useful for understanding available fields and building sync logic.
+ * Useful for understanding available fields and building queries.
  */
 
 import { z } from 'zod';
@@ -21,7 +21,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
       description:
         'List all available product attributes (system and custom). ' +
         'Returns attribute keys, types, labels, and options for dropdown fields. ' +
-        'Use this to discover what attributes exist for syncing to external systems.',
+        'Use this to discover what attributes exist and their data types.',
       inputSchema: {
         include_options: z
           .boolean()
