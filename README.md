@@ -1,6 +1,6 @@
 # Plytix MCP Server
 
-A **lightweight, stateless Model Context Protocol (MCP) server** that provides AI assistants with live access to Plytix PIM (Product Information Management) data. This server enables AI tools like Claude Desktop to search, look up, and retrieve product information directly from the Plytix API.
+A **lightweight, stateless Model Context Protocol (MCP) server** that provides AI assistants with live access to Plytix PIM (Product Information Management) data. This server enables AI tools like Claude Desktop, Claude mobile app, and other MCP clients to search, look up, and retrieve product information directly from the Plytix API.
 
 > **Note:** This is a read-only query tool for live API access. For sync, caching, or ETL workflows, see [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
 
@@ -13,6 +13,7 @@ A **lightweight, stateless Model Context Protocol (MCP) server** that provides A
 - **Automatic authentication** with token refresh
 - **Rate limit handling** with exponential backoff
 - **Zero persistence** — stateless, no database required
+- **Remote server support** — Deploy to Cloudflare Workers for mobile/web access
 
 ## Installation
 
@@ -68,6 +69,43 @@ Add to your Claude Desktop MCP configuration (`~/Library/Application Support/Cla
 npm start          # Production mode
 npm run dev        # Development with hot reload
 ```
+
+## Remote Server (Cloudflare Workers)
+
+Deploy as a remote MCP server for access from Claude mobile app, web clients, or shared team access.
+
+### Quick Deploy
+
+```bash
+# Install dependencies (includes wrangler)
+npm install
+
+# Login to Cloudflare
+wrangler login
+
+# Deploy to Cloudflare Workers
+npm run deploy
+```
+
+### Using the Remote Server
+
+Once deployed, connect from any MCP client using the deployed URL and your Plytix credentials:
+
+```bash
+# With Claude Desktop (using mcp-remote)
+npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
+  --header "X-Plytix-API-Key: YOUR_API_KEY" \
+  --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
+```
+
+### Local Development
+
+```bash
+npm run dev:worker         # Start local worker at localhost:8787
+npm run test:worker        # Test the worker endpoints
+```
+
+For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md).
 
 ## Available Tools
 
@@ -154,12 +192,15 @@ Products return an `overwritten_attributes` array listing which attributes are e
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Development server with hot reload |
+| `npm run dev` | Development server with hot reload (stdio) |
+| `npm run dev:worker` | Development server for Cloudflare Workers |
 | `npm run build` | Build TypeScript to JavaScript |
-| `npm start` | Start production server |
+| `npm run deploy` | Deploy to Cloudflare Workers |
+| `npm start` | Start production server (stdio) |
 | `npm test` | Run unit tests (vitest) |
 | `npm run test:watch` | Run tests in watch mode |
 | `npm run test:mcp` | Test MCP protocol handshake |
+| `npm run test:worker` | Test worker endpoints |
 | `npm run test:all` | Build + unit + integration + MCP tests |
 | `npm run typecheck` | Type check without building |
 
@@ -167,8 +208,11 @@ Products return an `overwritten_attributes` array listing which attributes are e
 
 ```
 src/
-  index.ts              # MCP server entry point
+  index.ts              # MCP server entry point (stdio transport)
+  worker.ts             # Cloudflare Worker entry point (HTTP transport)
   client.ts             # Plytix API client with auth & rate limiting
+  worker-client.ts      # Worker-compatible client (BYOK credentials)
+  worker-lookup.ts      # Worker-compatible smart lookup
   types.ts              # TypeScript types
   lookup/
     identifier.ts       # Identifier type detection
@@ -181,6 +225,9 @@ src/
     categories.ts       # Category listing
     variants.ts         # Variant listing
   supplyline/           # Supplyline-specific customizations
+wrangler.toml           # Cloudflare Workers configuration
+docs/
+  remote-setup.md       # Remote server setup guide
 ```
 
 ### Design Principles

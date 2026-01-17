@@ -1,0 +1,28 @@
+# Plytix MCP Server - Cloudflare Workers Configuration
+#
+# This configures the remote MCP server for Plytix PIM access.
+# API credentials are provided per-request by the client (BYOK model).
+
+name = "plytix-mcp"
+main = "src/worker.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# No secrets stored here - API key comes from client headers
+# This enables the "bring your own API key" model
+
+[vars]
+PLYTIX_API_BASE = "https://pim.plytix.com"
+PLYTIX_AUTH_URL = "https://auth.plytix.com/auth/api/get-token"
+
+# Development settings
+[dev]
+port = 8787
+
+# Build configuration
+[build]
+command = "npm run build:worker"
+
+# Observability
+[observability]
+enabled = true
