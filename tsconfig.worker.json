@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "./dist-worker",
+    "rootDir": "./src",
+    "lib": [
+      "ES2021",
+      "WebWorker"
+    ],
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": true,
+    "types": [
+      "@cloudflare/workers-types"
+    ],
+    "noEmit": true
+  },
+  "include": [
+    "src/worker.ts",
+    "src/worker-client.ts",
+    "src/worker-lookup.ts",
+    "src/types.ts",
+    "src/lookup/identifier.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-worker",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
+}

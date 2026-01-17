@@ -10,7 +10,8 @@
     "product-information-management",
     "ai",
     "claude",
-    "model-context-protocol"
+    "model-context-protocol",
+    "cloudflare-workers"
   ],
   "homepage": "https://github.com/Supplyline/plytix-mcp",
   "repository": {
@@ -33,13 +34,18 @@
   ],
   "scripts": {
     "dev": "tsx src/index.ts",
+    "dev:worker": "wrangler dev",
     "build": "tsc",
+    "build:worker": "tsc --project tsconfig.worker.json",
     "start": "node dist/index.js",
+    "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "typecheck:worker": "tsc --noEmit --project tsconfig.worker.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "node test-integration.js",
     "test:mcp": "node test-mcp-client.js",
+    "test:worker": "node test-worker.js",
     "test:all": "npm run build && npm run test && npm run test:integration && npm run test:mcp"
   },
   "engines": {
@@ -51,9 +57,11 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241230.0",
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.6.3",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "wrangler": "^3.99.0"
   }
 }
