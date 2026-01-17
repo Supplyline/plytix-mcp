@@ -82,13 +82,12 @@ function getCorsHeaders(request: Request): Record<string, string> {
     'Access-Control-Max-Age': '86400',
   };
 
-  // Allow all origins in development, or check against allowed list
+  // Only allow specific origins (Claude clients and local development)
   if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.claude.ai')) {
     headers['Access-Control-Allow-Origin'] = origin;
-  } else if (origin) {
-    // For now, allow all origins (can be restricted in production)
-    headers['Access-Control-Allow-Origin'] = origin;
   }
+  // For requests without an allowed origin, don't set Access-Control-Allow-Origin
+  // This will cause browsers to block cross-origin requests from unauthorized sites
 
   return headers;
 }
