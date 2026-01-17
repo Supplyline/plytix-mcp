@@ -40,23 +40,42 @@ src/
     variants.ts         # Variant listing
   supplyline/           # Supplyline-specific customizations
     index.ts            # Supplyline tool registration
+    sync/               # Channel export and Supabase sync
+      types.ts          # Sync types (NormalizedProduct, etc.)
+      channel.ts        # Channel JSON parser and normalizer
+      tools.ts          # Sync MCP tools
+      index.ts          # Barrel export
+supabase/
+  migrations/
+    001_plytix_sync_schema.sql  # Supabase schema for Plytix sync
 ```
 
 ## Available MCP Tools
 
+### Generic Tools (any Plytix user)
+
 | Tool | Description |
 |------|-------------|
-| `products.lookup` | Smart lookup by any identifier (auto-detects type) |
-| `products.get` | Get single product by ID (includes `overwritten_attributes`) |
-| `products.search` | Advanced search with filters, pagination, sorting |
-| `products.find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
-| `families.list` | List/search product families |
-| `families.get` | Get single family with linked attributes |
-| `attributes.list` | List all attributes (system + custom) |
-| `attributes.filters` | Get available search filters |
-| `assets.list` | List assets linked to a product |
-| `categories.list` | List categories linked to a product |
-| `variants.list` | List variants for a product |
+| `products_lookup` | Smart lookup by any identifier (auto-detects type) |
+| `products_get` | Get single product by ID (includes `overwritten_attributes`) |
+| `products_search` | Advanced search with filters, pagination, sorting |
+| `products_find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
+| `families_list` | List/search product families |
+| `families_get` | Get single family with linked attributes |
+| `attributes_list` | List all attributes (system + custom) |
+| `attributes_filters` | Get available search filters |
+| `assets_list` | List assets linked to a product |
+| `categories_list` | List categories linked to a product |
+| `variants_list` | List variants for a product |
+
+### Supplyline-Specific Tools (sync/ETL)
+
+| Tool | Description |
+|------|-------------|
+| `channel_parse` | Parse Plytix Channel JSON export, normalize for Supabase |
+| `channel_fetch` | Fetch Channel from URL and parse (for testing) |
+| `inheritance_fetch` | Fetch `overwritten_attributes` for products via API |
+| `inheritance_check` | Check if specific attribute is inherited or overwritten |
 
 ## Smart Lookup System
 
@@ -145,9 +164,50 @@ Related fields:
 - Integration tests: `test-integration.js` (requires credentials)
 - MCP handshake: `test-mcp-client.js`
 
+## Supabase Sync Architecture
+
+The sync system uses Plytix Channel exports for bulk data (no rate limits) plus API calls for metadata:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PLYTIX CHANNEL (Daily scheduled export)                        │
+│  • JSON export of all products + attributes                     │
+│  • No API rate limits                                           │
+│  • Handles 90K+ products in seconds                             │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  channel_parse tool                                             │
+│  • Normalize SKU Level ("2 | Parent" → 2)                       │
+│  • Deduplicate _1 suffix fields                                 │
+│  • Generate checksums for change detection                      │
+│  • Resolve parent_id from group_id                              │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  SUPABASE (via migration schema)                                │
+│  Tables: plytix_products, plytix_families, plytix_attributes    │
+│  • Checksum-based upsert (skip unchanged)                       │
+│  • overwritten_attributes fetched on-demand                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key files:**
+- `supabase/migrations/001_plytix_sync_schema.sql` - Database schema
+- `src/supplyline/sync/channel.ts` - Channel parser
+- `src/supplyline/sync/tools.ts` - MCP sync tools
+
 ## Session Notes
 
-_Last updated: 2025-01-16_
+_Last updated: 2026-01-16_
+
+### Recent Changes (v0.3.0)
+- Added Channel export parsing tools (`channel_parse`, `channel_fetch`)
+- Added inheritance tools (`inheritance_fetch`, `inheritance_check`)
+- Created Supabase migration schema aligned with Shopware patterns
+- Added `plytix_` prefixed tables: products, families, attributes, assets, sync_log
+- Checksum-based change detection for efficient upserts
+- Parent/variant relationship resolution from group_id
 
 ### Recent Changes (v0.2.0)
 - Ported smart lookup system from archived codebase
