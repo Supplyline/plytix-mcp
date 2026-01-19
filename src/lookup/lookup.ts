@@ -304,6 +304,19 @@ export class PlytixLookup {
     const { mpn, mno } = await this.discoverCustomLabels();
     plan.push(`labels:mpn(${mpn.length}),mno(${mno.length})`);
 
+    const buildNormalizedVariants = (value: string): string[] => {
+      const normalized = normalize(value);
+      const variants = [value];
+
+      if (normalized && normalized !== value.toUpperCase()) {
+        variants.push(normalized);
+      }
+
+      return [...new Set(variants)];
+    };
+
+    const isGtin = (value: string): boolean => /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(value);
+
     // Helper to execute search
     const executeSearch = async (body: PlytixSearchBody, tag: string): Promise<Match[]> => {
       plan.push(tag);
@@ -369,17 +382,24 @@ export class PlytixLookup {
     // Strategy 2: Exact field matches
     const exactSearches: Array<{ body: PlytixSearchBody; tag: string }> = [];
 
-    if (type === 'sku' || type === 'unknown') {
-      exactSearches.push({
-        body: { filters: [[{ field: 'sku', operator: 'eq', value: identifier }]] },
-        tag: 'sku_eq',
+    const shouldTrySku = type !== 'id' && type !== 'label';
+    const identifierVariants = buildNormalizedVariants(identifier);
+
+    if (shouldTrySku) {
+      identifierVariants.forEach((variant) => {
+        exactSearches.push({
+          body: { filters: [[{ field: 'sku', operator: 'eq', value: variant }]] },
+          tag: variant === identifier ? 'sku_eq' : 'sku_eq_normalized',
+        });
       });
     }
 
     if (type === 'gtin') {
-      exactSearches.push({
-        body: { filters: [[{ field: 'gtin', operator: 'eq', value: identifier }]] },
-        tag: 'gtin_eq',
+      identifierVariants.filter(isGtin).forEach((variant) => {
+        exactSearches.push({
+          body: { filters: [[{ field: 'gtin', operator: 'eq', value: variant }]] },
+          tag: variant === identifier ? 'gtin_eq' : 'gtin_eq_normalized',
+        });
       });
     }
 
@@ -393,18 +413,22 @@ export class PlytixLookup {
 
     if (type === 'mpn' || type === 'unknown') {
       for (const field of mpn) {
-        exactSearches.push({
-          body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
-          tag: `${field}_eq`,
+        identifierVariants.forEach((variant) => {
+          exactSearches.push({
+            body: { filters: [[{ field, operator: 'eq', value: variant }]] },
+            tag: variant === identifier ? `${field}_eq` : `${field}_eq_normalized`,
+          });
         });
       }
     }
 
     if (type === 'mno' || type === 'unknown') {
       for (const field of mno) {
-        exactSearches.push({
-          body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
-          tag: `${field}_eq`,
+        identifierVariants.forEach((variant) => {
+          exactSearches.push({
+            body: { filters: [[{ field, operator: 'eq', value: variant }]] },
+            tag: variant === identifier ? `${field}_eq` : `${field}_eq_normalized`,
+          });
         });
       }
     }
@@ -490,22 +514,39 @@ export class PlytixLookup {
 
     const { mpn, mno } = await this.discoverCustomLabels();
     const filters: PlytixSearchBody['filters'] = [];
+    const buildNormalizedVariants = (value: string): string[] => {
+      const normalized = normalize(value);
+      const variants = [value];
+
+      if (normalized && normalized !== value.toUpperCase()) {
+        variants.push(normalized);
+      }
+
+      return [...new Set(variants)];
+    };
+    const isGtin = (value: string): boolean => /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(value);
 
     if (criteria.sku) {
-      filters.push([{ field: 'sku', operator: 'eq', value: criteria.sku }]);
+      const variants = buildNormalizedVariants(criteria.sku);
+      filters.push(variants.map((variant) => ({ field: 'sku', operator: 'eq' as const, value: variant })));
     }
     if (criteria.gtin) {
-      filters.push([{ field: 'gtin', operator: 'eq', value: criteria.gtin }]);
+      const variants = buildNormalizedVariants(criteria.gtin).filter(isGtin);
+      if (variants.length) {
+        filters.push(variants.map((variant) => ({ field: 'gtin', operator: 'eq' as const, value: variant })));
+      }
     }
     if (criteria.label) {
       const tokens = criteria.label.split(/[^A-Za-z0-9]+/).filter(Boolean);
       filters.push(tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token })));
     }
     if (criteria.mpn && mpn[0]) {
-      filters.push([{ field: mpn[0], operator: 'eq', value: criteria.mpn }]);
+      const variants = buildNormalizedVariants(criteria.mpn);
+      filters.push(variants.map((variant) => ({ field: mpn[0], operator: 'eq' as const, value: variant })));
     }
     if (criteria.mno && mno[0]) {
-      filters.push([{ field: mno[0], operator: 'eq', value: criteria.mno }]);
+      const variants = buildNormalizedVariants(criteria.mno);
+      filters.push(variants.map((variant) => ({ field: mno[0], operator: 'eq' as const, value: variant })));
     }
     if (criteria.fuzzySearch) {
       const searchFields = ['sku', 'label', 'gtin', ...mpn, ...mno];
