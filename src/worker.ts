@@ -571,7 +571,7 @@ const toolHandlers: Record<string, ToolHandler> = {
 
 async function handleMcpRequest(
   request: JsonRpcRequest,
-  client: WorkerPlytixClient
+  client: WorkerPlytixClient | null
 ): Promise<JsonRpcResponse> {
   const { id, method, params } = request;
 
@@ -605,6 +605,17 @@ async function handleMcpRequest(
       }
 
       case 'tools/call': {
+        if (!client) {
+          return {
+            jsonrpc: '2.0',
+            id: id ?? null,
+            error: {
+              code: -32600,
+              message: 'Authentication required for tool calls. Provide API credentials.',
+            },
+          };
+        }
+
         const toolName = (params?.name as string) ?? '';
         const args = (params?.arguments as Record<string, unknown>) ?? {};
 
@@ -717,8 +728,17 @@ export default {
             health: '/health',
           },
           authentication: {
-            method: 'headers',
-            required: ['X-Plytix-API-Key', 'X-Plytix-API-Password'],
+            methods: [
+              {
+                type: 'headers',
+                required: ['X-Plytix-API-Key', 'X-Plytix-API-Password'],
+              },
+              {
+                type: 'bearer',
+                format: 'Bearer <api_key>:<api_password>',
+                note: 'For Craft Agents and other MCP clients',
+              },
+            ],
           },
         }),
         {
@@ -729,18 +749,63 @@ export default {
 
     // MCP endpoint
     if (url.pathname === '/mcp' && request.method === 'POST') {
-      // Extract API credentials from headers
-      const apiKey = request.headers.get('X-Plytix-API-Key');
-      const apiPassword = request.headers.get('X-Plytix-API-Password');
+      // Parse JSON-RPC request first to check if auth is needed
+      let body: JsonRpcRequest | JsonRpcRequest[];
+      let bodyText: string;
+      try {
+        bodyText = await request.text();
+        body = JSON.parse(bodyText);
+      } catch {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            error: { code: -32700, message: 'Parse error: Invalid JSON' },
+          }),
+          {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          }
+        );
+      }
 
+      // Methods that don't require authentication (for MCP client discovery)
+      const publicMethods = ['initialize', 'notifications/initialized', 'tools/list'];
+      const requests = Array.isArray(body) ? body : [body];
+      const allPublic = requests.every(
+        (req) => req && typeof req === 'object' && typeof req.method === 'string' && publicMethods.includes(req.method)
+      );
+
+      // Extract API credentials from headers
+      // Supports two formats:
+      // 1. Custom headers: X-Plytix-API-Key and X-Plytix-API-Password
+      // 2. Bearer token: Authorization: Bearer <api_key>:<api_password>
+      let apiKey = request.headers.get('X-Plytix-API-Key');
+      let apiPassword = request.headers.get('X-Plytix-API-Password');
+
+      // Fallback to Bearer token format for Craft Agents compatibility
       if (!apiKey || !apiPassword) {
+        const authHeader = request.headers.get('Authorization');
+        if (authHeader?.startsWith('Bearer ')) {
+          const token = authHeader.slice(7); // Remove 'Bearer ' prefix
+          const colonIndex = token.indexOf(':');
+          if (colonIndex > 0) {
+            apiKey = token.slice(0, colonIndex);
+            apiPassword = token.slice(colonIndex + 1);
+          }
+        }
+      }
+
+      // Only require auth for non-public methods
+      if (!allPublic && (!apiKey || !apiPassword)) {
         return new Response(
           JSON.stringify({
             jsonrpc: '2.0',
             id: null,
             error: {
               code: -32600,
-              message: 'Missing Plytix API credentials. Provide X-Plytix-API-Key and X-Plytix-API-Password headers.',
+              message:
+                'Missing Plytix API credentials. Provide either X-Plytix-API-Key and X-Plytix-API-Password headers, or Authorization: Bearer <api_key>:<api_password>',
             },
           }),
           {
@@ -750,51 +815,32 @@ export default {
         );
       }
 
-      // Create client with request credentials
-      let client: WorkerPlytixClient;
-      try {
-        client = new WorkerPlytixClient({
-          apiKey,
-          apiPassword,
-          baseUrl: env.PLYTIX_API_BASE,
-          authUrl: env.PLYTIX_AUTH_URL,
-        });
-      } catch (error) {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: null,
-            error: {
-              code: -32600,
-              message: error instanceof Error ? error.message : 'Failed to initialize client',
-            },
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json', ...corsHeaders },
-          }
-        );
-      }
-
-      // Parse JSON-RPC request
-      let body: JsonRpcRequest | JsonRpcRequest[];
-      try {
-        body = await request.json();
-      } catch {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: null,
-            error: {
-              code: -32700,
-              message: 'Parse error: Invalid JSON',
-            },
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json', ...corsHeaders },
-          }
-        );
+      // Create client with request credentials (only if we have them)
+      let client: WorkerPlytixClient | null = null;
+      if (apiKey && apiPassword) {
+        try {
+          client = new WorkerPlytixClient({
+            apiKey,
+            apiPassword,
+            baseUrl: env.PLYTIX_API_BASE,
+            authUrl: env.PLYTIX_AUTH_URL,
+          });
+        } catch (error) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: {
+                code: -32600,
+                message: error instanceof Error ? error.message : 'Failed to initialize client',
+              },
+            }),
+            {
+              status: 400,
+              headers: { 'Content-Type': 'application/json', ...corsHeaders },
+            }
+          );
+        }
       }
 
       // Handle batch requests
