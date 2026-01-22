@@ -184,10 +184,10 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
 
   for (const part of parts) {
     if (current === null || typeof current !== 'object') {
-      return undefined;
+      return obj[path];
     }
     current = (current as Record<string, unknown>)[part];
   }
 
-  return current;
+  return current ?? obj[path];
 }
