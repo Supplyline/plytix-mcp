@@ -9,6 +9,8 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
 import { PlytixLookup } from '../lookup/index.js';
+import { registerTool } from './register.js';
+import type { IdentifierType } from '../lookup/identifier.js';
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
   // Create lookup instance for smart search
@@ -18,7 +20,8 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // products.lookup - Smart identifier-based lookup
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ identifier: string; type?: IdentifierType; limit: number }>(
+    server,
     'products_lookup',
     {
       title: 'Smart Product Lookup',
@@ -101,7 +104,8 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // products.get - Fetch single product by ID
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ product_id: string }>(
+    server,
     'products_get',
     {
       title: 'Get Product',
@@ -145,7 +149,13 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // products.search - Advanced search with filters
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{
+    attributes?: string[];
+    filters?: unknown[];
+    pagination?: { page: number; page_size: number };
+    sort?: unknown;
+  }>(
+    server,
     'products_search',
     {
       title: 'Search Products',
@@ -176,7 +186,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     },
     async (args) => {
       try {
-        const result = await client.searchProducts(args);
+        const result = await client.searchProducts(args as Parameters<typeof client.searchProducts>[0]);
 
         return {
           content: [
@@ -212,7 +222,16 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // products.find - Multi-criteria search
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{
+    sku?: string;
+    mpn?: string;
+    mno?: string;
+    gtin?: string;
+    label?: string;
+    fuzzy_search?: string;
+    limit: number;
+  }>(
+    server,
     'products_find',
     {
       title: 'Find Products',

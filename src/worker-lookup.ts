@@ -12,18 +12,25 @@ import {
   type IdentifierType,
   normalize,
   calculateSimilarity,
-  DEFAULT_MPN_LABELS,
-  DEFAULT_MNO_LABELS,
 } from './lookup/identifier.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Default search fields for vanilla Plytix.
+ * Override with config.searchFields.
+ */
+export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
+
 export interface WorkerLookupConfig {
-  mpnLabels?: string[];
-  mnoLabels?: string[];
-  extraSearchFields?: string[];
+  /**
+   * Fields to search when looking up products.
+   * Use "attributes.mpn" format for custom attributes.
+   * Defaults to DEFAULT_SEARCH_FIELDS.
+   */
+  searchFields?: string[];
   pageSize?: number;
 }
 
@@ -49,7 +56,7 @@ export interface LookupResult {
 // ─────────────────────────────────────────────────────────────
 
 export class WorkerPlytixLookup {
-  private discoveredLabels?: { mpn: string[]; mno: string[] };
+  private readonly searchFields: string[];
 
   constructor(
     private client: WorkerPlytixClient,
@@ -59,65 +66,9 @@ export class WorkerPlytixLookup {
       pageSize: 5,
       ...cfg,
     };
-  }
 
-  // ─────────────────────────────────────────────────────────────
-  // Label Discovery
-  // ─────────────────────────────────────────────────────────────
-
-  private async discoverCustomLabels(): Promise<{ mpn: string[]; mno: string[] }> {
-    // Return cached discovery
-    if (this.discoveredLabels) {
-      return this.discoveredLabels;
-    }
-
-    // Use configured labels if provided
-    if (this.cfg.mpnLabels || this.cfg.mnoLabels) {
-      const result = {
-        mpn: this.cfg.mpnLabels ?? DEFAULT_MPN_LABELS,
-        mno: this.cfg.mnoLabels ?? DEFAULT_MNO_LABELS,
-      };
-      this.discoveredLabels = result;
-      return result;
-    }
-
-    // Fallback: inspect available filters to find attribute synonyms
-    try {
-      const filters = await this.client.getAvailableFilters();
-      const attrs: string[] = [];
-
-      if (filters.data) {
-        for (const filter of filters.data) {
-          if (filter.field?.startsWith('attributes.')) {
-            attrs.push(filter.field);
-          }
-        }
-      }
-
-      const findMatchingFields = (patterns: RegExp[]) => {
-        return attrs.filter((key) => patterns.some((pattern) => pattern.test(key)));
-      };
-
-      const mpnPatterns = [/\bmpn\b/i, /manufacturer.*part/i, /mfr.*part/i, /part_number/i, /part[-_. ]?no/i];
-      const mnoPatterns = [/\bmodel\b/i, /model_?no/i, /\bmno\b/i, /item_?number/i];
-
-      const result = {
-        mpn: findMatchingFields(mpnPatterns),
-        mno: findMatchingFields(mnoPatterns),
-      };
-
-      // Use defaults if nothing discovered
-      if (!result.mpn.length) result.mpn = DEFAULT_MPN_LABELS;
-      if (!result.mno.length) result.mno = DEFAULT_MNO_LABELS;
-
-      this.discoveredLabels = result;
-      return result;
-    } catch {
-      // Final fallback
-      const result = { mpn: DEFAULT_MPN_LABELS, mno: DEFAULT_MNO_LABELS };
-      this.discoveredLabels = result;
-      return result;
-    }
+    // Initialize search fields from config or defaults
+    this.searchFields = cfg.searchFields?.length ? cfg.searchFields : DEFAULT_SEARCH_FIELDS;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -209,16 +160,12 @@ export class WorkerPlytixLookup {
     const detection = detectIdentifierType(identifier);
     const type = explicitType ?? detection.type;
     const plan: string[] = [`detected_type:${type}(${detection.confidence})`];
-
-    const { mpn, mno } = await this.discoverCustomLabels();
-    plan.push(`labels:mpn(${mpn.length}),mno(${mno.length})`);
+    plan.push(`search_fields:${this.searchFields.join(',')}`);
 
     const executeSearch = async (body: PlytixSearchBody, tag: string): Promise<Match[]> => {
       plan.push(tag);
 
-      const attributes = [
-        ...new Set(['sku', 'label', 'gtin', ...mpn, ...mno, ...(this.cfg.extraSearchFields ?? [])]),
-      ].slice(0, 50);
+      const attributes = [...new Set(this.searchFields)].slice(0, 50);
 
       const searchBody: PlytixSearchBody = {
         ...body,
@@ -271,42 +218,27 @@ export class WorkerPlytixLookup {
       }
     }
 
-    // Strategy 2: Exact field matches
+    // Strategy 2: Exact field matches based on detected type
     const exactSearches: Array<{ body: PlytixSearchBody; tag: string }> = [];
 
-    if (type === 'sku' || type === 'unknown') {
-      exactSearches.push({
-        body: { filters: [[{ field: 'sku', operator: 'eq', value: identifier }]] },
-        tag: 'sku_eq',
-      });
-    }
-
-    if (type === 'gtin') {
-      exactSearches.push({
-        body: { filters: [[{ field: 'gtin', operator: 'eq', value: identifier }]] },
-        tag: 'gtin_eq',
-      });
-    }
-
-    if (type === 'label') {
-      const tokens = identifier.split(/[^A-Za-z0-9]+/).filter(Boolean);
-      exactSearches.push({
-        body: { filters: [tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token }))] },
-        tag: 'label_like_tokens',
-      });
-    }
-
-    if (type === 'mpn' || type === 'unknown') {
-      for (const field of mpn) {
+    for (const field of this.searchFields) {
+      if (field === 'sku' && (type === 'sku' || type === 'unknown')) {
         exactSearches.push({
-          body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
-          tag: `${field}_eq`,
+          body: { filters: [[{ field: 'sku', operator: 'eq', value: identifier }]] },
+          tag: 'sku_eq',
         });
-      }
-    }
-
-    if (type === 'mno' || type === 'unknown') {
-      for (const field of mno) {
+      } else if (field === 'gtin' && type === 'gtin') {
+        exactSearches.push({
+          body: { filters: [[{ field: 'gtin', operator: 'eq', value: identifier }]] },
+          tag: 'gtin_eq',
+        });
+      } else if (field === 'label' && type === 'label') {
+        const tokens = identifier.split(/[^A-Za-z0-9]+/).filter(Boolean);
+        exactSearches.push({
+          body: { filters: [tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token }))] },
+          tag: 'label_like_tokens',
+        });
+      } else if (field.startsWith('attributes.') && (type === 'mpn' || type === 'mno' || type === 'unknown')) {
         exactSearches.push({
           body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
           tag: `${field}_eq`,
@@ -325,12 +257,11 @@ export class WorkerPlytixLookup {
       }
     }
 
-    // Strategy 3: Text search across multiple fields
+    // Strategy 3: Text search across all configured fields
     if (matches.length === 0) {
       try {
-        const searchFields = ['sku', 'label', 'gtin', ...mpn, ...mno, ...(this.cfg.extraSearchFields ?? [])];
         const textSearchResults = await executeSearch(
-          { filters: [[{ field: searchFields, operator: 'text_search', value: identifier }]] },
+          { filters: [[{ field: this.searchFields, operator: 'text_search', value: identifier }]] },
           'text_search_multi'
         );
         matches.push(...textSearchResults);
@@ -345,14 +276,11 @@ export class WorkerPlytixLookup {
         const tokens = identifier.split(/[^A-Za-z0-9]+/).filter(Boolean);
         const firstToken = tokens[0] ?? identifier;
 
-        const broadFilters = [
-          { field: 'sku', operator: 'like' as const, value: firstToken },
-          { field: 'label', operator: 'like' as const, value: firstToken },
-        ];
-
-        if (mpn[0]) {
-          broadFilters.push({ field: mpn[0], operator: 'like' as const, value: firstToken });
-        }
+        const broadFilters = this.searchFields.slice(0, 3).map((field) => ({
+          field,
+          operator: 'like' as const,
+          value: firstToken,
+        }));
 
         const broadResults = await executeSearch({ filters: [broadFilters] }, 'broad_like_search');
         matches.push(...broadResults);
@@ -388,7 +316,6 @@ export class WorkerPlytixLookup {
     const { limit = 5, returnFields = [] } = criteria;
     const plan: string[] = ['multi_criteria_search'];
 
-    const { mpn, mno } = await this.discoverCustomLabels();
     const filters: PlytixSearchBody['filters'] = [];
 
     if (criteria.sku) {
@@ -401,18 +328,19 @@ export class WorkerPlytixLookup {
       const tokens = criteria.label.split(/[^A-Za-z0-9]+/).filter(Boolean);
       filters.push(tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token })));
     }
-    if (criteria.mpn && mpn[0]) {
-      filters.push([{ field: mpn[0], operator: 'eq', value: criteria.mpn }]);
+    // For MPN/MNO, search any custom attribute fields in searchFields
+    const customAttrFields = this.searchFields.filter((f) => f.startsWith('attributes.'));
+    if (criteria.mpn && customAttrFields.length > 0) {
+      filters.push([{ field: customAttrFields[0], operator: 'eq', value: criteria.mpn }]);
     }
-    if (criteria.mno && mno[0]) {
-      filters.push([{ field: mno[0], operator: 'eq', value: criteria.mno }]);
+    if (criteria.mno && customAttrFields.length > 1) {
+      filters.push([{ field: customAttrFields[1], operator: 'eq', value: criteria.mno }]);
     }
     if (criteria.fuzzySearch) {
-      const searchFields = ['sku', 'label', 'gtin', ...mpn, ...mno];
-      filters.push([{ field: searchFields, operator: 'text_search', value: criteria.fuzzySearch }]);
+      filters.push([{ field: this.searchFields, operator: 'text_search', value: criteria.fuzzySearch }]);
     }
 
-    const attributes = [...new Set(['sku', 'label', 'gtin', ...mpn, ...mno, ...returnFields])].slice(0, 50);
+    const attributes = [...new Set([...this.searchFields, ...returnFields])].slice(0, 50);
 
     try {
       const result = await this.client.searchProducts({
