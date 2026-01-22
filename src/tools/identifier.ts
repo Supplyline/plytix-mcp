@@ -149,9 +149,7 @@ export function registerIdentifierTools(server: McpServer) {
             reason:
               similarity === 1.0
                 ? 'Exact match (normalized)'
-                : similarity > 0
-                  ? 'Partial match (substring)'
-                  : 'No match',
+                : 'Partial match (substring)',
           };
         }
       }
