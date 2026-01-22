@@ -311,6 +311,27 @@ export class WorkerPlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Variants (v1 API - write operations)
+  // ─────────────────────────────────────────────────────────────
+
+  async resyncVariants(
+    parentProductId: string,
+    attributeLabels: string[],
+    variantIds: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/products/${encodeURIComponent(parentProductId)}/variants/resync`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          attribute_labels: attributeLabels,
+          variant_ids: variantIds,
+        }),
+      }
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Generic Request (for custom endpoints)
   // ─────────────────────────────────────────────────────────────
 

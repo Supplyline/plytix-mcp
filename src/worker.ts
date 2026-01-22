@@ -268,6 +268,32 @@ const TOOLS: ToolDefinition[] = [
       required: ['product_id'],
     },
   },
+  {
+    name: 'variants_resync',
+    description:
+      'Resync variant attributes to inherit values from the parent product. ' +
+      'Restores overwritten attributes on specified variants to use the parent\'s value instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_product_id: {
+          type: 'string',
+          description: 'The parent product ID containing the variants',
+        },
+        attribute_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of attribute labels to reset (must be attributes at parent level)',
+        },
+        variant_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of variant product IDs to resync (must be variants of the specified parent)',
+        },
+      },
+      required: ['parent_product_id', 'attribute_labels', 'variant_ids'],
+    },
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -555,6 +581,32 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               variants: result.data,
               count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async variants_resync(args, client) {
+    const parentProductId = args.parent_product_id as string;
+    const attributeLabels = args.attribute_labels as string[];
+    const variantIds = args.variant_ids as string[];
+
+    await client.resyncVariants(parentProductId, attributeLabels, variantIds);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              parent_product_id: parentProductId,
+              attributes_reset: attributeLabels,
+              variants_affected: variantIds.length,
             },
             null,
             2
