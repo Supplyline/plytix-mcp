@@ -772,7 +772,9 @@ export default {
       // Methods that don't require authentication (for MCP client discovery)
       const publicMethods = ['initialize', 'notifications/initialized', 'tools/list'];
       const requests = Array.isArray(body) ? body : [body];
-      const allPublic = requests.every((req) => publicMethods.includes(req.method));
+      const allPublic = requests.every(
+        (req) => req && typeof req === 'object' && typeof req.method === 'string' && publicMethods.includes(req.method)
+      );
 
       // Extract API credentials from headers
       // Supports two formats:
