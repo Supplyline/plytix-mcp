@@ -21,8 +21,9 @@ import {
 /**
  * Default search fields for vanilla Plytix.
  * Override with config.searchFields.
+ * Includes attributes.mpn and attributes.mno so products.find MPN/MNO filters work out of the box.
  */
-export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
+export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin', 'attributes.mpn', 'attributes.mno'];
 
 const sanitizeSearchFields = (fields: unknown): string[] => {
   if (!Array.isArray(fields)) return [];

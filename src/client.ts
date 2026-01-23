@@ -330,7 +330,7 @@ export class PlytixClient {
         method: 'POST',
         body: JSON.stringify({
           attribute_labels: attributeLabels,
-          product_ids: variantIds,
+          variant_ids: variantIds,
         }),
       }
     );
