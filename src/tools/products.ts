@@ -303,4 +303,203 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
       }
     }
   );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.create - Create a new product
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    sku: string;
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+    category_ids?: string[];
+    asset_ids?: string[];
+  }>(
+    server,
+    'products_create',
+    {
+      title: 'Create Product',
+      description:
+        'Create a new product. Only SKU is required. ' +
+        'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+      inputSchema: {
+        sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
+        label: z.string().optional().describe('Product label/name'),
+        status: z.string().optional().describe('Product status'),
+        attributes: z
+          .record(z.unknown())
+          .optional()
+          .describe('Custom attributes as key-value pairs (use attribute labels as keys)'),
+        category_ids: z
+          .array(z.string())
+          .optional()
+          .describe('Category IDs to link to this product'),
+        asset_ids: z.array(z.string()).optional().describe('Asset IDs to link to this product'),
+      },
+    },
+    async ({ sku, label, status, attributes, category_ids, asset_ids }) => {
+      try {
+        const data: Parameters<typeof client.createProduct>[0] = { sku };
+        if (label) data.label = label;
+        if (status) data.status = status;
+        if (attributes) data.attributes = attributes;
+        if (category_ids?.length) data.categories = category_ids.map((id) => ({ id }));
+        if (asset_ids?.length) data.assets = asset_ids.map((id) => ({ id }));
+
+        const result = await client.createProduct(data);
+        const created = result.data?.[0];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  id: created?.id,
+                  created: created?.created,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error creating product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.update - Update product attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    product_id: string;
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+  }>(
+    server,
+    'products_update',
+    {
+      title: 'Update Product',
+      description:
+        'Update a product. Partial update - only specified fields are changed. ' +
+        'Set an attribute value to null to clear it.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID to update'),
+        label: z.string().optional().describe('New product label/name'),
+        status: z.string().optional().describe('New product status'),
+        attributes: z
+          .record(z.unknown())
+          .optional()
+          .describe('Attributes to update (use attribute labels as keys, null to clear)'),
+      },
+    },
+    async ({ product_id, label, status, attributes }) => {
+      try {
+        const data: Parameters<typeof client.updateProduct>[1] = {};
+        if (label !== undefined) data.label = label;
+        if (status !== undefined) data.status = status;
+        if (attributes !== undefined) data.attributes = attributes;
+
+        const result = await client.updateProduct(product_id, data);
+        const updated = result.data?.[0];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  id: updated?.id,
+                  modified: updated?.modified,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error updating product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.assign_family - Assign/unassign family
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ product_id: string; family_id: string }>(
+    server,
+    'products_assign_family',
+    {
+      title: 'Assign Product Family',
+      description:
+        'Assign a product family to a product. Pass empty string to unassign. ' +
+        'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID'),
+        family_id: z
+          .string()
+          .describe('The family ID to assign (empty string to unassign)'),
+      },
+    },
+    async ({ product_id, family_id }) => {
+      try {
+        const result = await client.assignProductFamily(product_id, family_id);
+        const updated = result.data?.[0];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  id: updated?.id,
+                  family_id: family_id || null,
+                  action: family_id ? 'assigned' : 'unassigned',
+                  modified: updated?.modified,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error assigning family: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
 }

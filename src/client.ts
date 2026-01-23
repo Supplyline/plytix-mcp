@@ -308,6 +308,93 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Products - Write Operations (v2 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new product. Only `sku` is mandatory.
+   * Cannot create new attributes, categories, or assets - must link existing ones.
+   */
+  async createProduct(data: {
+    sku: string;
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+    categories?: Array<{ id: string }>;
+    assets?: Array<{ id: string }>;
+  }): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>('/api/v2/products', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Update a product's attributes. Partial update - only specified fields are changed.
+   * Set an attribute to null to clear it.
+   */
+  async updateProduct(
+    productId: string,
+    data: {
+      label?: string;
+      status?: string;
+      attributes?: Record<string, unknown>;
+    }
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Assign or unassign a family to a product.
+   * Pass empty string to unassign.
+   * Warning: Changing family may cause data loss. Cannot assign to variant products.
+   */
+  async assignProductFamily(
+    productId: string,
+    familyId: string
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/family`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ product_family_id: familyId }),
+      }
+    );
+  }
+
+  /**
+   * Link an existing category to a product.
+   */
+  async linkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ id: categoryId }),
+      }
+    );
+  }
+
+  /**
+   * Unlink a category from a product. Category is not deleted.
+   */
+  async unlinkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories/${encodeURIComponent(categoryId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Variants (v1 API - write operations)
   // ─────────────────────────────────────────────────────────────
 
