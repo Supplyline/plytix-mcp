@@ -27,10 +27,11 @@ export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin', 'attributes.mpn', 
 
 const sanitizeSearchFields = (fields: unknown): string[] => {
   if (!Array.isArray(fields)) return [];
-  return fields
+  const cleaned = fields
     .filter((field): field is string => typeof field === 'string')
     .map((field) => field.trim())
     .filter((field) => field.length > 0);
+  return [...new Set(cleaned)]; // Deduplicate to avoid redundant API calls
 };
 
 export interface LookupConfig {
