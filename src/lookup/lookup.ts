@@ -24,6 +24,14 @@ import {
  */
 export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
 
+const sanitizeSearchFields = (fields: unknown): string[] => {
+  if (!Array.isArray(fields)) return [];
+  return fields
+    .filter((field): field is string => typeof field === 'string')
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0);
+};
+
 export interface LookupConfig {
   /**
    * Fields to search when looking up products.
@@ -87,8 +95,9 @@ export class PlytixLookup {
    */
   private initSearchFields(): string[] {
     // 1. Use config if provided
-    if (this.cfg.searchFields?.length) {
-      return this.cfg.searchFields;
+    const configFields = sanitizeSearchFields(this.cfg.searchFields);
+    if (configFields.length > 0) {
+      return configFields;
     }
 
     // 2. Try PLYTIX_SEARCH_FIELDS env var (JSON array)
@@ -96,8 +105,9 @@ export class PlytixLookup {
     if (envFields) {
       try {
         const parsed = JSON.parse(envFields);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+        const envFieldsParsed = sanitizeSearchFields(parsed);
+        if (envFieldsParsed.length > 0) {
+          return envFieldsParsed;
         }
       } catch {
         // Ignore parse errors, fall through to defaults

@@ -24,6 +24,14 @@ import {
  */
 export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
 
+const sanitizeSearchFields = (fields: unknown): string[] => {
+  if (!Array.isArray(fields)) return [];
+  return fields
+    .filter((field): field is string => typeof field === 'string')
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0);
+};
+
 export interface WorkerLookupConfig {
   /**
    * Fields to search when looking up products.
@@ -68,7 +76,8 @@ export class WorkerPlytixLookup {
     };
 
     // Initialize search fields from config or defaults
-    this.searchFields = cfg.searchFields?.length ? cfg.searchFields : DEFAULT_SEARCH_FIELDS;
+    const configFields = sanitizeSearchFields(cfg.searchFields);
+    this.searchFields = configFields.length > 0 ? configFields : DEFAULT_SEARCH_FIELDS;
   }
 
   // ─────────────────────────────────────────────────────────────
