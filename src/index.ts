@@ -15,6 +15,7 @@ import { registerAttributeTools } from './tools/attributes.js';
 import { registerAssetTools } from './tools/assets.js';
 import { registerCategoryTools } from './tools/categories.js';
 import { registerVariantTools } from './tools/variants.js';
+import { registerIdentifierTools } from './tools/identifier.js';
 
 async function main() {
   const server = new McpServer({
@@ -31,6 +32,7 @@ async function main() {
   registerAssetTools(server, client);
   registerCategoryTools(server, client);
   registerVariantTools(server, client);
+  registerIdentifierTools(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
