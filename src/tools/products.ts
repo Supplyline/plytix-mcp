@@ -341,14 +341,23 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     async ({ sku, label, status, attributes, category_ids, asset_ids }) => {
       try {
         const data: Parameters<typeof client.createProduct>[0] = { sku };
-        if (label) data.label = label;
-        if (status) data.status = status;
-        if (attributes) data.attributes = attributes;
+        if (label !== undefined) data.label = label;
+        if (status !== undefined) data.status = status;
+        if (attributes !== undefined) data.attributes = attributes;
         if (category_ids?.length) data.categories = category_ids.map((id) => ({ id }));
         if (asset_ids?.length) data.assets = asset_ids.map((id) => ({ id }));
 
         const result = await client.createProduct(data);
         const created = result.data?.[0];
+
+        if (!created?.id) {
+          return {
+            content: [
+              { type: 'text', text: 'Product creation failed: no ID returned from API' },
+            ],
+            isError: true,
+          };
+        }
 
         return {
           content: [
@@ -357,8 +366,8 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
               text: JSON.stringify(
                 {
                   success: true,
-                  id: created?.id,
-                  created: created?.created,
+                  id: created.id,
+                  created: created.created,
                 },
                 null,
                 2
@@ -417,6 +426,15 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         const result = await client.updateProduct(product_id, data);
         const updated = result.data?.[0];
 
+        if (!updated?.id) {
+          return {
+            content: [
+              { type: 'text', text: `Product update failed: no response for ${product_id}` },
+            ],
+            isError: true,
+          };
+        }
+
         return {
           content: [
             {
@@ -424,8 +442,8 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
               text: JSON.stringify(
                 {
                   success: true,
-                  id: updated?.id,
-                  modified: updated?.modified,
+                  id: updated.id,
+                  modified: updated.modified,
                 },
                 null,
                 2
@@ -471,6 +489,15 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         const result = await client.assignProductFamily(product_id, family_id);
         const updated = result.data?.[0];
 
+        if (!updated?.id) {
+          return {
+            content: [
+              { type: 'text', text: `Family assignment failed: no response for ${product_id}` },
+            ],
+            isError: true,
+          };
+        }
+
         return {
           content: [
             {
@@ -478,10 +505,10 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
               text: JSON.stringify(
                 {
                   success: true,
-                  id: updated?.id,
+                  id: updated.id,
                   family_id: family_id || null,
                   action: family_id ? 'assigned' : 'unassigned',
-                  modified: updated?.modified,
+                  modified: updated.modified,
                 },
                 null,
                 2
