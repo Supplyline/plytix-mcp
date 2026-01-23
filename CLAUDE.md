@@ -44,6 +44,8 @@ src/
 
 ## Available MCP Tools
 
+### Read Operations
+
 | Tool | Description |
 |------|-------------|
 | `products.lookup` | Smart lookup by any identifier (auto-detects type) |
@@ -57,6 +59,17 @@ src/
 | `assets.list` | List assets linked to a product |
 | `categories.list` | List categories linked to a product |
 | `variants.list` | List variants for a product |
+
+### Write Operations
+
+| Tool | Description |
+|------|-------------|
+| `products.create` | Create a new product (SKU required) |
+| `products.update` | Update product attributes (PATCH - partial update) |
+| `products.assign_family` | Assign/unassign family (⚠️ may cause data loss) |
+| `categories.link` | Link existing category to product |
+| `categories.unlink` | Unlink category from product |
+| `variants.resync` | Restore variant attributes to inherit from parent |
 
 ## Smart Lookup System
 
@@ -147,9 +160,14 @@ Related fields:
 
 ## Session Notes
 
-_Last updated: 2025-01-16_
+_Last updated: 2025-01-22_
 
-### Recent Changes (v0.2.0)
+### Recent Changes
+- Added write tools: `products.create`, `products.update`, `products.assign_family`
+- Added category tools: `categories.link`, `categories.unlink`
+- Client methods for all write operations
+
+### v0.2.0 (2025-01-16)
 - Ported smart lookup system from archived codebase
 - Added families tools (list, get)
 - Added attributes tools (list, filters)
