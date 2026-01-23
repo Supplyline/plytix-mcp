@@ -95,22 +95,3 @@ export function calculateSimilarity(a: string, b: string): number {
   return 0;
 }
 
-/**
- * Default attribute labels for MPN fields
- */
-export const DEFAULT_MPN_LABELS = [
-  'attributes.mpn',
-  'attributes.manufacturer_part_number',
-  'attributes.part_number',
-  'attributes.mfr_part_number',
-];
-
-/**
- * Default attribute labels for MNO (model number) fields
- */
-export const DEFAULT_MNO_LABELS = [
-  'attributes.mno',
-  'attributes.model',
-  'attributes.model_number',
-  'attributes.model_no',
-];

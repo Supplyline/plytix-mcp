@@ -8,13 +8,15 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
+import { registerTool } from './register.js';
 
 export function registerFamilyTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
   // families.list - Search/list product families
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ query?: string; page: number; page_size: number }>(
+    server,
     'families_list',
     {
       title: 'List Product Families',
@@ -72,7 +74,8 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
   // families.get - Get single family with details
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ family_id: string }>(
+    server,
     'families_get',
     {
       title: 'Get Product Family',

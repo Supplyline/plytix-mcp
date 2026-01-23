@@ -308,6 +308,35 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Variants (v1 API - write operations)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Resync variant attributes to inherit values from the parent product.
+   * Restores overwritten attributes on specified variants to use the parent's value instead.
+   *
+   * @param parentProductId - The parent product ID containing the variants
+   * @param attributeLabels - List of attribute labels to reset (must be attributes at parent level)
+   * @param variantIds - List of variant product IDs to resync (must be variants of the specified parent)
+   */
+  async resyncVariants(
+    parentProductId: string,
+    attributeLabels: string[],
+    variantIds: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/products/${encodeURIComponent(parentProductId)}/variants/resync`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          attribute_labels: attributeLabels,
+          variant_ids: variantIds,
+        }),
+      }
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Generic Request (for custom endpoints)
   // ─────────────────────────────────────────────────────────────
 

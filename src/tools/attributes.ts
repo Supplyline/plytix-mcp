@@ -8,13 +8,15 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
+import { registerTool } from './register.js';
 
 export function registerAttributeTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
   // attributes.list - List all available attributes
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ include_options: boolean }>(
+    server,
     'attributes_list',
     {
       title: 'List Attributes',
@@ -69,7 +71,8 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
   // attributes.filters - Get available search filters
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<Record<string, never>>(
+    server,
     'attributes_filters',
     {
       title: 'Get Search Filters',
