@@ -13,6 +13,7 @@ import {
   calculateSimilarity,
   type IdentifierType,
 } from '../lookup/identifier.js';
+import { registerTool } from './register.js';
 
 // Pattern descriptions for detection results
 const PATTERN_DESCRIPTIONS: Record<IdentifierType, string> = {
@@ -30,7 +31,8 @@ export function registerIdentifierTools(server: McpServer) {
   // identifier.detect - Detect identifier type from raw value
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ value: string }>(
+    server,
     'identifier_detect',
     {
       title: 'Detect Identifier Type',
@@ -69,7 +71,8 @@ export function registerIdentifierTools(server: McpServer) {
   // identifier.normalize - Normalize identifier for comparison
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ value: string }>(
+    server,
     'identifier_normalize',
     {
       title: 'Normalize Identifier',
@@ -106,7 +109,8 @@ export function registerIdentifierTools(server: McpServer) {
   // match.score - Score a match between identifier and product data
   // ─────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool<{ identifier: string; product_data: Record<string, unknown>; fields?: string[] }>(
+    server,
     'match_score',
     {
       title: 'Score Match',
