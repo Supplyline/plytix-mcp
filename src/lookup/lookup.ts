@@ -21,9 +21,40 @@ import {
 /**
  * Default search fields for vanilla Plytix.
  * Override with PLYTIX_SEARCH_FIELDS env var or config.
- * Includes attributes.mpn and attributes.mno so products.find MPN/MNO filters work out of the box.
  */
-export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin', 'attributes.mpn', 'attributes.mno'];
+export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
+
+/**
+ * Default MPN/MNO labels for exact match searches.
+ * Override with PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS or config.
+ */
+export const DEFAULT_MPN_LABELS = ['attributes.mpn'];
+export const DEFAULT_MNO_LABELS = ['attributes.model_no'];
+
+const normalizeAttributeLabel = (label: string): string | null => {
+  const trimmed = label.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith('attributes.') ? trimmed : `attributes.${trimmed}`;
+};
+
+const normalizeAttributeLabels = (labels?: string[]): string[] => {
+  if (!labels) return [];
+  const normalized = labels
+    .map((label) => (typeof label === 'string' ? normalizeAttributeLabel(label) : null))
+    .filter((label): label is string => Boolean(label));
+  return [...new Set(normalized)];
+};
+
+const parseLabelEnv = (value?: string): string[] => {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return normalizeAttributeLabels(parsed);
+  } catch {
+    return [];
+  }
+};
 
 const sanitizeSearchFields = (fields: unknown): string[] => {
   if (!Array.isArray(fields)) return [];
@@ -41,6 +72,13 @@ export interface LookupConfig {
    * Use "attributes.mpn" format for custom attributes.
    */
   searchFields?: string[];
+  /**
+   * Attribute labels for MPN/MNO exact match searches.
+   * Accepts labels (e.g., "mpn") or field paths (e.g., "attributes.mpn").
+   * Defaults to PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS or DEFAULT_*_LABELS.
+   */
+  mpnLabels?: string[];
+  mnoLabels?: string[];
   pageSize?: number;
   cacheEnabled?: boolean;
   cacheTtlMs?: number;
@@ -76,6 +114,8 @@ interface CacheEntry {
 export class PlytixLookup {
   private cache = new Map<string, CacheEntry>();
   private readonly searchFields: string[];
+  private readonly mpnFields: string[];
+  private readonly mnoFields: string[];
 
   constructor(
     private client: PlytixClient,
@@ -90,6 +130,8 @@ export class PlytixLookup {
 
     // Initialize search fields from config, env var, or defaults
     this.searchFields = this.initSearchFields();
+    this.mpnFields = this.initMpnFields();
+    this.mnoFields = this.initMnoFields();
   }
 
   /**
@@ -118,6 +160,26 @@ export class PlytixLookup {
 
     // 3. Use defaults
     return DEFAULT_SEARCH_FIELDS;
+  }
+
+  private initMpnFields(): string[] {
+    const configLabels = normalizeAttributeLabels(this.cfg.mpnLabels);
+    if (configLabels.length > 0) return configLabels;
+
+    const envLabels = parseLabelEnv(process.env.PLYTIX_MPN_LABELS);
+    if (envLabels.length > 0) return envLabels;
+
+    return normalizeAttributeLabels(DEFAULT_MPN_LABELS);
+  }
+
+  private initMnoFields(): string[] {
+    const configLabels = normalizeAttributeLabels(this.cfg.mnoLabels);
+    if (configLabels.length > 0) return configLabels;
+
+    const envLabels = parseLabelEnv(process.env.PLYTIX_MNO_LABELS);
+    if (envLabels.length > 0) return envLabels;
+
+    return normalizeAttributeLabels(DEFAULT_MNO_LABELS);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -267,11 +329,15 @@ export class PlytixLookup {
     plan.push(`search_fields:${this.searchFields.join(',')}`);
 
     // Helper to execute search
-    const executeSearch = async (body: PlytixSearchBody, tag: string): Promise<Match[]> => {
+    const executeSearch = async (
+      body: PlytixSearchBody,
+      tag: string,
+      extraAttributes: string[] = []
+    ): Promise<Match[]> => {
       plan.push(tag);
 
       // Request all configured search fields (up to API limit of 50)
-      const attributes = [...new Set(this.searchFields)].slice(0, 50);
+      const attributes = [...new Set([...this.searchFields, ...extraAttributes])].slice(0, 50);
 
       const searchBody: PlytixSearchBody = {
         ...body,
@@ -327,7 +393,12 @@ export class PlytixLookup {
     }
 
     // Strategy 2: Exact field matches based on detected type
-    const exactSearches: Array<{ body: PlytixSearchBody; tag: string }> = [];
+    const exactSearches: Array<{
+      body: PlytixSearchBody;
+      tag: string;
+      extraAttributes?: string[];
+    }> = [];
+    const attributeExactFields = new Set<string>();
 
     // For each configured search field, try exact match if type is compatible
     for (const field of this.searchFields) {
@@ -349,18 +420,33 @@ export class PlytixLookup {
           tag: 'label_like_tokens',
         });
       } else if (field.startsWith('attributes.') && (type === 'mpn' || type === 'mno' || type === 'unknown')) {
-        // Custom attribute fields - try exact match for MPN/MNO/unknown types
-        exactSearches.push({
-          body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
-          tag: `${field}_eq`,
-        });
+        attributeExactFields.add(field);
       }
+    }
+
+    if (type === 'mpn' || type === 'unknown') {
+      for (const field of this.mpnFields) {
+        attributeExactFields.add(field);
+      }
+    }
+    if (type === 'mno' || type === 'unknown') {
+      for (const field of this.mnoFields) {
+        attributeExactFields.add(field);
+      }
+    }
+
+    for (const field of attributeExactFields) {
+      exactSearches.push({
+        body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
+        tag: `${field}_eq`,
+        extraAttributes: [field],
+      });
     }
 
     // Execute exact searches
     for (const search of exactSearches) {
       try {
-        const results = await executeSearch(search.body, search.tag);
+        const results = await executeSearch(search.body, search.tag, search.extraAttributes ?? []);
         matches.push(...results);
 
         // Early exit on high-confidence match
@@ -445,21 +531,25 @@ export class PlytixLookup {
       const tokens = criteria.label.split(/[^A-Za-z0-9]+/).filter(Boolean);
       filters.push(tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token })));
     }
-    // For MPN/MNO, search any custom attribute fields in searchFields
-    const customAttrFields = this.searchFields.filter((f) => f.startsWith('attributes.'));
-    if (criteria.mpn && customAttrFields.length > 0) {
-      // Try the first custom attribute field for MPN
-      filters.push([{ field: customAttrFields[0], operator: 'eq', value: criteria.mpn }]);
+    // For MPN/MNO, search configured attribute labels
+    if (criteria.mpn && this.mpnFields.length > 0) {
+      filters.push(
+        this.mpnFields.map((field) => ({ field, operator: 'eq', value: criteria.mpn }))
+      );
     }
-    if (criteria.mno && customAttrFields.length > 1) {
-      // Try the second custom attribute field for MNO if available
-      filters.push([{ field: customAttrFields[1], operator: 'eq', value: criteria.mno }]);
+    if (criteria.mno && this.mnoFields.length > 0) {
+      filters.push(
+        this.mnoFields.map((field) => ({ field, operator: 'eq', value: criteria.mno }))
+      );
     }
     if (criteria.fuzzySearch) {
       filters.push([{ field: this.searchFields, operator: 'text_search', value: criteria.fuzzySearch }]);
     }
 
-    const attributes = [...new Set([...this.searchFields, ...returnFields])].slice(0, 50);
+    const extraAttributes: string[] = [];
+    if (criteria.mpn) extraAttributes.push(...this.mpnFields);
+    if (criteria.mno) extraAttributes.push(...this.mnoFields);
+    const attributes = [...new Set([...this.searchFields, ...returnFields, ...extraAttributes])].slice(0, 50);
 
     try {
       const result = await this.client.searchProducts({

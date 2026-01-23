@@ -21,9 +21,29 @@ import {
 /**
  * Default search fields for vanilla Plytix.
  * Override with config.searchFields.
- * Includes attributes.mpn and attributes.mno so products.find MPN/MNO filters work out of the box.
  */
-export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin', 'attributes.mpn', 'attributes.mno'];
+export const DEFAULT_SEARCH_FIELDS = ['sku', 'label', 'gtin'];
+
+/**
+ * Default MPN/MNO labels for exact match searches.
+ * Override with config.mpnLabels / config.mnoLabels.
+ */
+export const DEFAULT_MPN_LABELS = ['attributes.mpn'];
+export const DEFAULT_MNO_LABELS = ['attributes.model_no'];
+
+const normalizeAttributeLabel = (label: string): string | null => {
+  const trimmed = label.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith('attributes.') ? trimmed : `attributes.${trimmed}`;
+};
+
+const normalizeAttributeLabels = (labels?: string[]): string[] => {
+  if (!labels) return [];
+  const normalized = labels
+    .map((label) => (typeof label === 'string' ? normalizeAttributeLabel(label) : null))
+    .filter((label): label is string => Boolean(label));
+  return [...new Set(normalized)];
+};
 
 const sanitizeSearchFields = (fields: unknown): string[] => {
   if (!Array.isArray(fields)) return [];
@@ -41,6 +61,13 @@ export interface WorkerLookupConfig {
    * Defaults to DEFAULT_SEARCH_FIELDS.
    */
   searchFields?: string[];
+  /**
+   * Attribute labels for MPN/MNO exact match searches.
+   * Accepts labels (e.g., "mpn") or field paths (e.g., "attributes.mpn").
+   * Defaults to DEFAULT_*_LABELS.
+   */
+  mpnLabels?: string[];
+  mnoLabels?: string[];
   pageSize?: number;
 }
 
@@ -67,6 +94,8 @@ export interface LookupResult {
 
 export class WorkerPlytixLookup {
   private readonly searchFields: string[];
+  private readonly mpnFields: string[];
+  private readonly mnoFields: string[];
 
   constructor(
     private client: WorkerPlytixClient,
@@ -80,6 +109,20 @@ export class WorkerPlytixLookup {
     // Initialize search fields from config or defaults
     const configFields = sanitizeSearchFields(cfg.searchFields);
     this.searchFields = configFields.length > 0 ? configFields : DEFAULT_SEARCH_FIELDS;
+    this.mpnFields = this.initMpnFields();
+    this.mnoFields = this.initMnoFields();
+  }
+
+  private initMpnFields(): string[] {
+    const configLabels = normalizeAttributeLabels(this.cfg.mpnLabels);
+    if (configLabels.length > 0) return configLabels;
+    return normalizeAttributeLabels(DEFAULT_MPN_LABELS);
+  }
+
+  private initMnoFields(): string[] {
+    const configLabels = normalizeAttributeLabels(this.cfg.mnoLabels);
+    if (configLabels.length > 0) return configLabels;
+    return normalizeAttributeLabels(DEFAULT_MNO_LABELS);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -173,10 +216,14 @@ export class WorkerPlytixLookup {
     const plan: string[] = [`detected_type:${type}(${detection.confidence})`];
     plan.push(`search_fields:${this.searchFields.join(',')}`);
 
-    const executeSearch = async (body: PlytixSearchBody, tag: string): Promise<Match[]> => {
+    const executeSearch = async (
+      body: PlytixSearchBody,
+      tag: string,
+      extraAttributes: string[] = []
+    ): Promise<Match[]> => {
       plan.push(tag);
 
-      const attributes = [...new Set(this.searchFields)].slice(0, 50);
+      const attributes = [...new Set([...this.searchFields, ...extraAttributes])].slice(0, 50);
 
       const searchBody: PlytixSearchBody = {
         ...body,
@@ -230,7 +277,12 @@ export class WorkerPlytixLookup {
     }
 
     // Strategy 2: Exact field matches based on detected type
-    const exactSearches: Array<{ body: PlytixSearchBody; tag: string }> = [];
+    const exactSearches: Array<{
+      body: PlytixSearchBody;
+      tag: string;
+      extraAttributes?: string[];
+    }> = [];
+    const attributeExactFields = new Set<string>();
 
     for (const field of this.searchFields) {
       if (field === 'sku' && (type === 'sku' || type === 'unknown')) {
@@ -250,16 +302,32 @@ export class WorkerPlytixLookup {
           tag: 'label_like_tokens',
         });
       } else if (field.startsWith('attributes.') && (type === 'mpn' || type === 'mno' || type === 'unknown')) {
-        exactSearches.push({
-          body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
-          tag: `${field}_eq`,
-        });
+        attributeExactFields.add(field);
       }
+    }
+
+    if (type === 'mpn' || type === 'unknown') {
+      for (const field of this.mpnFields) {
+        attributeExactFields.add(field);
+      }
+    }
+    if (type === 'mno' || type === 'unknown') {
+      for (const field of this.mnoFields) {
+        attributeExactFields.add(field);
+      }
+    }
+
+    for (const field of attributeExactFields) {
+      exactSearches.push({
+        body: { filters: [[{ field, operator: 'eq', value: identifier }]] },
+        tag: `${field}_eq`,
+        extraAttributes: [field],
+      });
     }
 
     for (const search of exactSearches) {
       try {
-        const results = await executeSearch(search.body, search.tag);
+        const results = await executeSearch(search.body, search.tag, search.extraAttributes ?? []);
         matches.push(...results);
 
         if (results.some((m) => m.confidence >= 0.99)) break;
@@ -339,19 +407,25 @@ export class WorkerPlytixLookup {
       const tokens = criteria.label.split(/[^A-Za-z0-9]+/).filter(Boolean);
       filters.push(tokens.map((token) => ({ field: 'label', operator: 'like' as const, value: token })));
     }
-    // For MPN/MNO, search any custom attribute fields in searchFields
-    const customAttrFields = this.searchFields.filter((f) => f.startsWith('attributes.'));
-    if (criteria.mpn && customAttrFields.length > 0) {
-      filters.push([{ field: customAttrFields[0], operator: 'eq', value: criteria.mpn }]);
+    // For MPN/MNO, search configured attribute labels
+    if (criteria.mpn && this.mpnFields.length > 0) {
+      filters.push(
+        this.mpnFields.map((field) => ({ field, operator: 'eq', value: criteria.mpn }))
+      );
     }
-    if (criteria.mno && customAttrFields.length > 1) {
-      filters.push([{ field: customAttrFields[1], operator: 'eq', value: criteria.mno }]);
+    if (criteria.mno && this.mnoFields.length > 0) {
+      filters.push(
+        this.mnoFields.map((field) => ({ field, operator: 'eq', value: criteria.mno }))
+      );
     }
     if (criteria.fuzzySearch) {
       filters.push([{ field: this.searchFields, operator: 'text_search', value: criteria.fuzzySearch }]);
     }
 
-    const attributes = [...new Set([...this.searchFields, ...returnFields])].slice(0, 50);
+    const extraAttributes: string[] = [];
+    if (criteria.mpn) extraAttributes.push(...this.mpnFields);
+    if (criteria.mno) extraAttributes.push(...this.mnoFields);
+    const attributes = [...new Set([...this.searchFields, ...returnFields, ...extraAttributes])].slice(0, 50);
 
     try {
       const result = await this.client.searchProducts({

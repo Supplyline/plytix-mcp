@@ -102,7 +102,8 @@ const TOOLS: ToolDefinition[] = [
     description:
       'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
       'Uses staged search strategies with confidence scoring. ' +
-      'Returns the best match along with the search plan used.',
+      'Returns the best match along with the search plan used. ' +
+      'MPN/MNO searches use attributes.mpn/model_no by default.',
     inputSchema: {
       type: 'object',
       properties: {

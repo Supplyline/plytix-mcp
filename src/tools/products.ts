@@ -29,6 +29,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
         'Uses staged search strategies with confidence scoring. ' +
         'Returns the best match along with the search plan used. ' +
+        'MPN/MNO searches use PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS (defaults to attributes.mpn/model_no). ' +
         'Includes overwritten_attributes to show which values are inherited vs explicitly set.',
       inputSchema: {
         identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
