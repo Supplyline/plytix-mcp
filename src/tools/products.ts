@@ -332,10 +332,10 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .optional()
           .describe('Custom attributes as key-value pairs (use attribute labels as keys)'),
         category_ids: z
-          .array(z.string())
+          .array(z.string().min(1))
           .optional()
           .describe('Category IDs to link to this product'),
-        asset_ids: z.array(z.string()).optional().describe('Asset IDs to link to this product'),
+        asset_ids: z.array(z.string().min(1)).optional().describe('Asset IDs to link to this product'),
       },
     },
     async ({ sku, label, status, attributes, category_ids, asset_ids }) => {
@@ -422,6 +422,13 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         if (label !== undefined) data.label = label;
         if (status !== undefined) data.status = status;
         if (attributes !== undefined) data.attributes = attributes;
+
+        if (Object.keys(data).length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No fields provided to update' }],
+            isError: true,
+          };
+        }
 
         const result = await client.updateProduct(product_id, data);
         const updated = result.data?.[0];
