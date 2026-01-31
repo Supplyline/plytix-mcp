@@ -21,6 +21,7 @@ import type {
   PlytixCategory,
   PlytixFamily,
   PlytixFilterDefinition,
+  PlytixAttributeDetail,
   RateLimitInfo,
 } from './types.js';
 import { PlytixError } from './types.js';
@@ -294,6 +295,71 @@ export class PlytixClient {
         custom: [],
       };
     }
+  }
+
+  /**
+   * Search for attribute IDs. Returns minimal data (id + filter_type).
+   * Use getAttribute() to get full details including options.
+   */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const attrIds: string[] = [];
+    let page = 1;
+
+    while (true) {
+      const result = await this.request<{ id: string; filter_type?: string }>(
+        '/api/v1/attributes/product/search',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            pagination: { page, page_size: pageSize },
+          }),
+        }
+      );
+
+      if (!result.data || result.data.length === 0) break;
+      attrIds.push(...result.data.map((a) => a.id));
+      if (result.data.length < pageSize) break;
+      page++;
+    }
+
+    return attrIds;
+  }
+
+  /**
+   * Get full attribute details by ID.
+   * Use this to get options for dropdown/multiselect attributes.
+   */
+  async getAttributeById(attrId: string): Promise<PlytixAttributeDetail | null> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attrId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  /**
+   * Get full attribute details by label (snake_case identifier like "head_material").
+   * Searches all attributes to find the matching one.
+   */
+  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
+    const attrIds = await this.searchAttributeIds();
+
+    for (const id of attrIds) {
+      const attr = await this.getAttributeById(id);
+      if (attr && attr.label === label) {
+        return attr;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get options for a dropdown/multiselect attribute by label.
+   * Returns empty array if attribute not found or has no options.
+   */
+  async getAttributeOptions(label: string): Promise<string[]> {
+    const attr = await this.getAttributeByLabel(label);
+    return attr?.options ?? [];
   }
 
   // ─────────────────────────────────────────────────────────────

@@ -55,6 +55,8 @@ src/
 | `families.list` | List/search product families |
 | `families.get` | Get single family with linked attributes |
 | `attributes.list` | List all attributes (system + custom) |
+| `attributes.get` | Get full details for a single attribute by label |
+| `attributes.get_options` | Get allowed values for a dropdown/multiselect attribute |
 | `attributes.filters` | Get available search filters |
 | `assets.list` | List assets linked to a product |
 | `categories.list` | List categories linked to a product |
