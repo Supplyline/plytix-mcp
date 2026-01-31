@@ -350,14 +350,14 @@ export class PlytixClient {
       return this.attributeCache.byLabel;
     }
 
-    // Fetch all attribute IDs, then details in parallel
+    // Fetch all attribute IDs, then details in parallel (graceful partial failure)
     const attrIds = await this.searchAttributeIds();
-    const attrDetails = await Promise.all(attrIds.map((id) => this.getAttributeById(id)));
+    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
 
     const byLabel = new Map<string, PlytixAttributeDetail>();
-    for (const attr of attrDetails) {
-      if (attr?.label) {
-        byLabel.set(attr.label, attr);
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value?.label) {
+        byLabel.set(result.value.label, result.value);
       }
     }
 
