@@ -21,6 +21,7 @@ import type {
   PlytixCategory,
   PlytixFamily,
   PlytixFilterDefinition,
+  PlytixAttributeDetail,
   RateLimitInfo,
 } from './types.js';
 import { PlytixError } from './types.js';
@@ -34,6 +35,7 @@ const DEFAULT_CONFIG = {
 export class PlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
+  private attributeCache?: { byLabel: Map<string, PlytixAttributeDetail>; expires: number };
 
   constructor(config?: Partial<PlytixClientConfig>) {
     this.config = {
@@ -294,6 +296,92 @@ export class PlytixClient {
         custom: [],
       };
     }
+  }
+
+  /**
+   * Search for attribute IDs. Returns minimal data (id + filter_type).
+   * Use getAttribute() to get full details including options.
+   */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const attrIds: string[] = [];
+    let page = 1;
+
+    while (true) {
+      const result = await this.request<{ id: string; filter_type?: string }>(
+        '/api/v1/attributes/product/search',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            pagination: { page, page_size: pageSize },
+          }),
+        }
+      );
+
+      if (!result.data || result.data.length === 0) break;
+      attrIds.push(...result.data.map((a) => a.id));
+      if (result.data.length < pageSize) break;
+      page++;
+    }
+
+    return attrIds;
+  }
+
+  /**
+   * Get full attribute details by ID.
+   * Use this to get options for dropdown/multiselect attributes.
+   */
+  async getAttributeById(attrId: string): Promise<PlytixAttributeDetail | null> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attrId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  /**
+   * Build attribute cache indexed by label. Fetches all attributes once,
+   * then caches for 5 minutes to avoid N+1 queries on repeated lookups.
+   */
+  private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    const now = Date.now();
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+    // Return cached if still valid
+    if (this.attributeCache && now < this.attributeCache.expires) {
+      return this.attributeCache.byLabel;
+    }
+
+    // Fetch all attribute IDs, then details in parallel (graceful partial failure)
+    const attrIds = await this.searchAttributeIds();
+    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
+
+    const byLabel = new Map<string, PlytixAttributeDetail>();
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value?.label) {
+        byLabel.set(result.value.label, result.value);
+      }
+    }
+
+    this.attributeCache = { byLabel, expires: now + CACHE_TTL_MS };
+    return byLabel;
+  }
+
+  /**
+   * Get full attribute details by label (snake_case identifier like "head_material").
+   * Uses cached attribute lookup to avoid N+1 queries.
+   */
+  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
+    const cache = await this.buildAttributeCache();
+    return cache.get(label) ?? null;
+  }
+
+  /**
+   * Get options for a dropdown/multiselect attribute by label.
+   * Returns null if attribute not found, empty array if attribute exists but has no options.
+   */
+  async getAttributeOptions(label: string): Promise<string[] | null> {
+    const attr = await this.getAttributeByLabel(label);
+    if (!attr) return null;
+    return attr.options ?? [];
   }
 
   // ─────────────────────────────────────────────────────────────

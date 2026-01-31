@@ -183,6 +183,28 @@ export interface PlytixAttribute {
   options?: unknown[];
 }
 
+/**
+ * Full attribute detail from GET /attributes/product/{id}
+ *
+ * Note: Plytix API naming is confusing:
+ * - API "label" = snake_case identifier (e.g., "head_material")
+ * - API "name" = human-readable display name (e.g., "Head Material")
+ */
+export interface PlytixAttributeDetail {
+  id: string;
+  label: string;          // snake_case identifier (e.g., "head_material")
+  name: string;           // display name (e.g., "Head Material")
+  type_class: string;     // "DropdownAttribute", "MultiSelectAttribute", "TextAttribute", etc.
+  options?: string[];     // allowed values for dropdown/multiselect
+  groups?: string[];      // attribute groups this belongs to
+  description?: string;
+  required?: boolean;
+  searchable?: boolean;
+  filterable?: boolean;
+  created?: string;
+  modified?: string;
+}
+
 export interface PlytixFilterDefinition {
   field: string;
   type: string;
