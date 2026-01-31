@@ -92,12 +92,8 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
 
         if (!attr) {
           return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: 'not_found', label, message: `Attribute "${label}" not found` }, null, 2),
-              },
-            ],
+            content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+            isError: true,
           };
         }
 

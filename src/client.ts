@@ -35,6 +35,7 @@ const DEFAULT_CONFIG = {
 export class PlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
+  private attributeCache?: { byLabel: Map<string, PlytixAttributeDetail>; expires: number };
 
   constructor(config?: Partial<PlytixClientConfig>) {
     this.config = {
@@ -337,20 +338,40 @@ export class PlytixClient {
   }
 
   /**
-   * Get full attribute details by label (snake_case identifier like "head_material").
-   * Searches all attributes to find the matching one.
+   * Build attribute cache indexed by label. Fetches all attributes once,
+   * then caches for 5 minutes to avoid N+1 queries on repeated lookups.
    */
-  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
-    const attrIds = await this.searchAttributeIds();
+  private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    const now = Date.now();
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-    for (const id of attrIds) {
-      const attr = await this.getAttributeById(id);
-      if (attr && attr.label === label) {
-        return attr;
+    // Return cached if still valid
+    if (this.attributeCache && now < this.attributeCache.expires) {
+      return this.attributeCache.byLabel;
+    }
+
+    // Fetch all attribute IDs, then details in parallel
+    const attrIds = await this.searchAttributeIds();
+    const attrDetails = await Promise.all(attrIds.map((id) => this.getAttributeById(id)));
+
+    const byLabel = new Map<string, PlytixAttributeDetail>();
+    for (const attr of attrDetails) {
+      if (attr?.label) {
+        byLabel.set(attr.label, attr);
       }
     }
 
-    return null;
+    this.attributeCache = { byLabel, expires: now + CACHE_TTL_MS };
+    return byLabel;
+  }
+
+  /**
+   * Get full attribute details by label (snake_case identifier like "head_material").
+   * Uses cached attribute lookup to avoid N+1 queries.
+   */
+  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
+    const cache = await this.buildAttributeCache();
+    return cache.get(label) ?? null;
   }
 
   /**
