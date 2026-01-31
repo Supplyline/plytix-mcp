@@ -376,11 +376,12 @@ export class PlytixClient {
 
   /**
    * Get options for a dropdown/multiselect attribute by label.
-   * Returns empty array if attribute not found or has no options.
+   * Returns null if attribute not found, empty array if attribute exists but has no options.
    */
-  async getAttributeOptions(label: string): Promise<string[]> {
+  async getAttributeOptions(label: string): Promise<string[] | null> {
     const attr = await this.getAttributeByLabel(label);
-    return attr?.options ?? [];
+    if (!attr) return null;
+    return attr.options ?? [];
   }
 
   // ─────────────────────────────────────────────────────────────

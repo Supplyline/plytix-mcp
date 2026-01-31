@@ -155,6 +155,13 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
       try {
         const options = await client.getAttributeOptions(label);
 
+        if (options === null) {
+          return {
+            content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+            isError: true,
+          };
+        }
+
         return {
           content: [
             {
