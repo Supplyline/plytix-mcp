@@ -160,19 +160,44 @@ Related fields:
 - Integration tests: `test-integration.js` (requires credentials)
 - MCP handshake: `test-mcp-client.js`
 
-## Session Notes
+## Session Handoff
 
-_Last updated: 2025-01-22_
-
-### Recent Changes
+**Last session:** January 2026
+**Status:** Active — functional MCP server with read/write tools
+**Recent changes:**
 - Added write tools: `products.create`, `products.update`, `products.assign_family`
 - Added category tools: `categories.link`, `categories.unlink`
-- Client methods for all write operations
+- Added `attributes.get` and `attributes.get_options` for dropdown sync
 
-### v0.2.0 (2025-01-16)
-- Ported smart lookup system from archived codebase
-- Added families tools (list, get)
-- Added attributes tools (list, filters)
-- Enhanced products.get to include overwritten_attributes
-- Added vitest test infrastructure
-- Improved PlytixClient with rate limiting and retry logic
+**Next steps:**
+- Consider adding batch operations for ETL use cases
+- Asset tools (link/unlink assets to products)
+
+---
+
+## Compound Loops Framework
+
+This repo participates in the **Compound Loops Framework** — a methodology where each unit of work makes future work easier.
+
+### Memory Systems
+
+| Artifact | Location | Purpose |
+|----------|----------|---------|
+| `docs/solutions/` | `docs/solutions/` | Solved problems, searchable by symptom/cause |
+| `progress.txt` | Root | Append-only session learnings |
+| This file | `CLAUDE.md` | Patterns, conventions, gotchas |
+
+### Key Practices
+
+1. **Before researching a new problem**: Search `docs/solutions/` first
+2. **After solving a non-trivial problem**: Document in `docs/solutions/`
+3. **End of session**: Append learnings to `progress.txt`
+4. **Pattern promotion**: After 3+ occurrences, add to Required Reading below
+
+### Required Reading
+
+<!-- Add promoted patterns here after 3+ occurrences -->
+
+---
+
+*Last updated: January 2026*

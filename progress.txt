@@ -1,0 +1,8 @@
+# Progress Log
+
+This file captures learnings from each work session. Append-only.
+Claude reads this at session start to build on previous context.
+
+---
+
+<!-- New sessions append below this line -->
