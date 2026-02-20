@@ -32,12 +32,14 @@ src/
     lookup.ts           # Smart product lookup with staged search
     index.ts            # Barrel export
   tools/
-    products.ts         # Product tools (lookup, get, search, find)
+    products.ts         # Product tools (lookup, get, search, find, writes)
     families.ts         # Family tools (list, get)
-    attributes.ts       # Attribute tools (list, filters)
-    assets.ts           # Asset listing
-    categories.ts       # Category listing
-    variants.ts         # Variant listing
+    attributes.ts       # Attribute metadata tools
+    product-attributes.ts # Atomic product attribute write tools
+    assets.ts           # Asset list/link/unlink tools
+    categories.ts       # Category list/link/unlink tools
+    variants.ts         # Variant list/resync tools
+    relationships.ts    # Product relationship write tools
   supplyline/           # Supplyline-specific customizations
     index.ts            # Supplyline tool registration
 ```
@@ -69,9 +71,16 @@ src/
 | `products.create` | Create a new product (SKU required) |
 | `products.update` | Update product attributes (PATCH - partial update) |
 | `products.assign_family` | Assign/unassign family (⚠️ may cause data loss) |
+| `products.set_attribute` | Set one product attribute atomically |
+| `products.clear_attribute` | Clear one product attribute atomically |
+| `assets.link` | Link existing asset to product |
+| `assets.unlink` | Unlink asset from product |
 | `categories.link` | Link existing category to product |
 | `categories.unlink` | Unlink category from product |
 | `variants.resync` | Restore variant attributes to inherit from parent |
+| `relationships.link_product` | Link one related product row |
+| `relationships.unlink_product` | Unlink one related product row |
+| `relationships.set_quantity` | Update quantity for one related product row |
 
 ## Smart Lookup System
 

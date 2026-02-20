@@ -92,6 +92,11 @@ function getCorsHeaders(request: Request): Record<string, string> {
   return headers;
 }
 
+function normalizeAttributeLabel(label: string): string {
+  const trimmed = label.trim();
+  return trimmed.startsWith('attributes.') ? trimmed.slice('attributes.'.length) : trimmed;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Tool Definitions
 // ─────────────────────────────────────────────────────────────
@@ -237,6 +242,34 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'products_set_attribute',
+    description:
+      'Set a single product attribute value atomically. ' +
+      'Use snake_case labels (e.g., "head_material").',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        attribute_label: { type: 'string', description: 'Attribute label (snake_case)' },
+        value: { description: 'Attribute value to set' },
+      },
+      required: ['product_id', 'attribute_label', 'value'],
+    },
+  },
+  {
+    name: 'products_clear_attribute',
+    description:
+      'Clear a single product attribute value atomically by setting it to null.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        attribute_label: { type: 'string', description: 'Attribute label (snake_case)' },
+      },
+      required: ['product_id', 'attribute_label'],
+    },
+  },
+  {
     name: 'assets_list',
     description: 'List assets linked to a product.',
     inputSchema: {
@@ -245,6 +278,34 @@ const TOOLS: ToolDefinition[] = [
         product_id: { type: 'string', description: 'The product ID' },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'assets_link',
+    description: 'Link an existing asset to a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        asset_id: { type: 'string', description: 'The asset ID to link' },
+        attribute_label: {
+          type: 'string',
+          description: 'Optional media attribute label to assign the asset to',
+        },
+      },
+      required: ['product_id', 'asset_id'],
+    },
+  },
+  {
+    name: 'assets_unlink',
+    description: 'Unlink an asset from a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        asset_id: { type: 'string', description: 'The asset ID to unlink' },
+      },
+      required: ['product_id', 'asset_id'],
     },
   },
   {
@@ -293,6 +354,50 @@ const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['parent_product_id', 'attribute_labels', 'variant_ids'],
+    },
+  },
+  {
+    name: 'relationships_link_product',
+    description:
+      'Link one product to another under a specific relationship.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to link' },
+        quantity: { type: 'number', description: 'Optional relationship quantity' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id'],
+    },
+  },
+  {
+    name: 'relationships_unlink_product',
+    description:
+      'Unlink one related product from a relationship on the primary product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to unlink' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id'],
+    },
+  },
+  {
+    name: 'relationships_set_quantity',
+    description:
+      'Set quantity for a single related product row in a relationship.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to update' },
+        quantity: { type: 'number', description: 'Quantity value to store' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id', 'quantity'],
     },
   },
 ];
@@ -528,6 +633,86 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async products_set_attribute(args, client) {
+    const productId = args.product_id as string;
+    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+    const value = args.value;
+
+    if (!attributeLabel) {
+      return {
+        content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
+        isError: true,
+      };
+    }
+
+    if (value === null) {
+      return {
+        content: [{ type: 'text', text: 'Value cannot be null. Use products_clear_attribute instead.' }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, {
+      attributes: { [attributeLabel]: value },
+    });
+    const updated = result.data?.[0];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              attribute_label: attributeLabel,
+              action: 'set',
+              modified: updated?.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_clear_attribute(args, client) {
+    const productId = args.product_id as string;
+    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+
+    if (!attributeLabel) {
+      return {
+        content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, {
+      attributes: { [attributeLabel]: null },
+    });
+    const updated = result.data?.[0];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              attribute_label: attributeLabel,
+              action: 'cleared',
+              modified: updated?.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async assets_list(args, client) {
     const productId = args.product_id as string;
     const result = await client.getProductAssets(productId);
@@ -540,6 +725,58 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               assets: result.data,
               count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_link(args, client) {
+    const productId = args.product_id as string;
+    const assetId = args.asset_id as string;
+    const attributeLabel = args.attribute_label as string | undefined;
+
+    const result = await client.linkProductAsset(productId, assetId, attributeLabel);
+    const linked = result.data?.[0];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              asset: linked ? { id: linked.id, name: linked.name, url: linked.url } : { id: assetId },
+              ...(attributeLabel ? { attribute_label: attributeLabel } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_unlink(args, client) {
+    const productId = args.product_id as string;
+    const assetId = args.asset_id as string;
+
+    await client.unlinkProductAsset(productId, assetId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              asset_id: assetId,
+              action: 'unlinked',
             },
             null,
             2
@@ -608,6 +845,98 @@ const toolHandlers: Record<string, ToolHandler> = {
               parent_product_id: parentProductId,
               attributes_reset: attributeLabels,
               variants_affected: variantIds.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_link_product(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+    const quantity = args.quantity as number | undefined;
+
+    await client.linkProductRelationship(productId, relationshipId, [
+      {
+        product_id: relatedProductId,
+        ...(quantity !== undefined ? { quantity } : {}),
+      },
+    ]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'linked',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+              ...(quantity !== undefined ? { quantity } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_unlink_product(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+
+    await client.unlinkProductRelationship(productId, relationshipId, [relatedProductId]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'unlinked',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_set_quantity(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+    const quantity = args.quantity as number;
+
+    await client.updateProductRelationship(productId, relationshipId, [
+      { product_id: relatedProductId, quantity },
+    ]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'quantity_updated',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+              quantity,
             },
             null,
             2
