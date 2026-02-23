@@ -9,6 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
 import type { PlytixAttributeDetail } from '../types.js';
 import { registerTool } from './register.js';
+import { stripAttributesPrefix } from '../utils/attribute-labels.js';
 
 export function registerProductAttributeTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
           };
         }
 
-        const normalizedLabel = normalizeAttributeLabel(attribute_label);
+        const normalizedLabel = stripAttributesPrefix(attribute_label);
         if (!normalizedLabel) {
           return {
             content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
@@ -124,7 +125,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     },
     async ({ product_id, attribute_label }) => {
       try {
-        const normalizedLabel = normalizeAttributeLabel(attribute_label);
+        const normalizedLabel = stripAttributesPrefix(attribute_label);
         if (!normalizedLabel) {
           return {
             content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
@@ -176,11 +177,6 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
       }
     }
   );
-}
-
-function normalizeAttributeLabel(label: string): string {
-  const trimmed = label.trim();
-  return trimmed.startsWith('attributes.') ? trimmed.slice('attributes.'.length) : trimmed;
 }
 
 function validateAttributeValue(attribute: PlytixAttributeDetail, value: unknown): string | null {

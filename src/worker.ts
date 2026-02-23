@@ -12,6 +12,7 @@
 
 import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
+import { stripAttributesPrefix } from './utils/attribute-labels.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -90,11 +91,6 @@ function getCorsHeaders(request: Request): Record<string, string> {
   // This will cause browsers to block cross-origin requests from unauthorized sites
 
   return headers;
-}
-
-function normalizeAttributeLabel(label: string): string {
-  const trimmed = label.trim();
-  return trimmed.startsWith('attributes.') ? trimmed.slice('attributes.'.length) : trimmed;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -635,7 +631,7 @@ const toolHandlers: Record<string, ToolHandler> = {
 
   async products_set_attribute(args, client) {
     const productId = args.product_id as string;
-    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
     const value = args.value;
 
     if (!attributeLabel) {
@@ -679,7 +675,7 @@ const toolHandlers: Record<string, ToolHandler> = {
 
   async products_clear_attribute(args, client) {
     const productId = args.product_id as string;
-    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
 
     if (!attributeLabel) {
       return {
