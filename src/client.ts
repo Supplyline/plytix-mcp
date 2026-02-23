@@ -436,6 +436,39 @@ export class PlytixClient {
   }
 
   /**
+   * Link an existing asset to a product.
+   * Optionally attach it to a media attribute label.
+   */
+  async linkProductAsset(
+    productId: string,
+    assetId: string,
+    attributeLabel?: string
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const body: { id: string; attribute_label?: string } = { id: assetId };
+    if (attributeLabel !== undefined) {
+      body.attribute_label = attributeLabel;
+    }
+
+    return this.request<PlytixAsset>(`/api/v2/products/${encodeURIComponent(productId)}/assets`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Unlink an asset from a product. Asset is not deleted from the account.
+   */
+  async unlinkProductAsset(
+    productId: string,
+    assetId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(assetId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
    * Assign or unassign a family to a product.
    * Pass empty string to unassign.
    * Warning: Changing family may cause data loss. Cannot assign to variant products.
@@ -479,6 +512,63 @@ export class PlytixClient {
     return this.request<void>(
       `/api/v2/products/${encodeURIComponent(productId)}/categories/${encodeURIComponent(categoryId)}`,
       { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Add related products to a relationship for a product.
+   */
+  async linkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Remove related products from a relationship for a product.
+   */
+  async unlinkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    relatedProductIds: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({
+          product_relationships: relatedProductIds,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Update relationship attributes for related products (e.g., quantity).
+   */
+  async updateProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
     );
   }
 

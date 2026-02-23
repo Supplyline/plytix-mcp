@@ -217,6 +217,14 @@ The Plytix API has rate limits. The server handles backoff automatically, but re
 | `families_get` | Get single family with linked attributes |
 | `attributes_list` | List all attributes (system + custom) |
 | `attributes_filters` | Get available search filters |
+| `products_set_attribute` | Set one product attribute atomically |
+| `products_clear_attribute` | Clear one product attribute atomically |
 | `assets_list` | List assets linked to a product |
+| `assets_link` | Link asset to a product |
+| `assets_unlink` | Unlink asset from a product |
 | `categories_list` | List categories linked to a product |
 | `variants_list` | List variants for a product |
+| `variants_resync` | Reset variant attributes to inherit from parent |
+| `relationships_link_product` | Link one related product row in a relationship |
+| `relationships_unlink_product` | Unlink one related product row in a relationship |
+| `relationships_set_quantity` | Update quantity for one related product row |

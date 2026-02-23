@@ -2,11 +2,11 @@
 
 A **lightweight, stateless Model Context Protocol (MCP) server** that provides AI assistants with live access to Plytix PIM (Product Information Management) data. This server enables AI tools like Claude Desktop, Claude mobile app, and other MCP clients to search, look up, and retrieve product information directly from the Plytix API.
 
-> **Note:** This is a read-only query tool for live API access. For sync, caching, or ETL workflows, see [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
+> **Note:** This is a stateless live API tool for read and write operations. For sync, caching, or ETL workflows, see [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
 
 ## Features
 
-- **11 MCP Tools** for comprehensive Plytix PIM access
+- **29 MCP tools (stdio) and 19 MCP tools (remote worker)**
 - **Smart product lookup** with automatic identifier detection (SKU, MPN, GTIN, label)
 - **Family & inheritance tracking** with overwritten_attributes support
 - **Schema discovery** for attributes and search filters
@@ -117,6 +117,11 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `products_get` | Get single product by ID with full details and `overwritten_attributes` |
 | `products_search` | Advanced search with filters, pagination, and sorting |
 | `products_find` | Simple multi-criteria search (SKU, MPN, MNO, GTIN, label, fuzzy) |
+| `products_create` | Create a new product |
+| `products_update` | Partial update to product fields/attributes |
+| `products_assign_family` | Assign or unassign a product family |
+| `products_set_attribute` | Atomic set of one attribute value |
+| `products_clear_attribute` | Atomic clear of one attribute value |
 
 ### Family Tools
 
@@ -130,6 +135,8 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | Tool | Description |
 |------|-------------|
 | `attributes_list` | List all attributes (system + custom) with types and options |
+| `attributes_get` | Get full metadata for one attribute label |
+| `attributes_get_options` | Get allowed values for a selectable attribute |
 | `attributes_filters` | Get available search filters and operators |
 
 ### Related Data Tools
@@ -137,8 +144,24 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | Tool | Description |
 |------|-------------|
 | `assets_list` | List assets (images, videos, documents) linked to a product |
+| `assets_link` | Link an asset to a product |
+| `assets_unlink` | Unlink an asset from a product |
 | `categories_list` | List categories associated with a product |
+| `categories_link` | Link a category to a product |
+| `categories_unlink` | Unlink a category from a product |
 | `variants_list` | List variants for a product |
+| `variants_resync` | Reset variant attributes to inherit parent values |
+| `relationships_link_product` | Link one related product row in a relationship |
+| `relationships_unlink_product` | Unlink one related product row in a relationship |
+| `relationships_set_quantity` | Update quantity for one related product row |
+
+### Identifier Utilities
+
+| Tool | Description |
+|------|-------------|
+| `identifier_detect` | Detect identifier type from raw value |
+| `identifier_normalize` | Normalize identifier for matching |
+| `match_score` | Score identifier-product match confidence |
 
 ## Smart Lookup System
 
@@ -218,12 +241,14 @@ src/
     identifier.ts       # Identifier type detection
     lookup.ts           # Smart lookup with staged search
   tools/
-    products.ts         # Product tools (lookup, get, search, find)
+    products.ts         # Product tools (lookup, get, search, find, write ops)
     families.ts         # Family tools (list, get)
-    attributes.ts       # Attribute tools (list, filters)
-    assets.ts           # Asset listing
-    categories.ts       # Category listing
-    variants.ts         # Variant listing
+    attributes.ts       # Attribute metadata tools
+    product-attributes.ts # Atomic product attribute write tools
+    assets.ts           # Asset list/link/unlink tools
+    categories.ts       # Category list/link/unlink tools
+    variants.ts         # Variant list/resync tools
+    relationships.ts    # Product relationship write tools
   supplyline/           # Supplyline-specific customizations
 wrangler.toml           # Cloudflare Workers configuration
 docs/

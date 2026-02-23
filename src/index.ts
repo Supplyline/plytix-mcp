@@ -16,6 +16,8 @@ import { registerAssetTools } from './tools/assets.js';
 import { registerCategoryTools } from './tools/categories.js';
 import { registerVariantTools } from './tools/variants.js';
 import { registerIdentifierTools } from './tools/identifier.js';
+import { registerProductAttributeTools } from './tools/product-attributes.js';
+import { registerRelationshipTools } from './tools/relationships.js';
 
 async function main() {
   const server = new McpServer({
@@ -32,6 +34,8 @@ async function main() {
   registerAssetTools(server, client);
   registerCategoryTools(server, client);
   registerVariantTools(server, client);
+  registerProductAttributeTools(server, client);
+  registerRelationshipTools(server, client);
   registerIdentifierTools(server);
 
   const transport = new StdioServerTransport();

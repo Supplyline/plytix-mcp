@@ -245,6 +245,91 @@ export class WorkerPlytixClient {
     return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}/variants`);
   }
 
+  async updateProduct(
+    productId: string,
+    data: {
+      label?: string;
+      status?: string;
+      attributes?: Record<string, unknown>;
+    }
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async linkProductAsset(
+    productId: string,
+    assetId: string,
+    attributeLabel?: string
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const body: { id: string; attribute_label?: string } = { id: assetId };
+    if (attributeLabel !== undefined) {
+      body.attribute_label = attributeLabel;
+    }
+
+    return this.request<PlytixAsset>(`/api/v2/products/${encodeURIComponent(productId)}/assets`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async unlinkProductAsset(productId: string, assetId: string): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(assetId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  async linkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
+    );
+  }
+
+  async unlinkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    relatedProductIds: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({
+          product_relationships: relatedProductIds,
+        }),
+      }
+    );
+  }
+
+  async updateProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Families (v1 API)
   // ─────────────────────────────────────────────────────────────
