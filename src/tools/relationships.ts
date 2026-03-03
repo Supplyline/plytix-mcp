@@ -24,9 +24,7 @@ export function registerRelationshipTools(server: McpServer, client: PlytixClien
     'relationships_link_product',
     {
       title: 'Link Related Product',
-      description:
-        'Link one product to another under a specific relationship. ' +
-        'If quantity is provided, it is stored in the relationship row.',
+      description: 'Link a related product to a relationship.',
       inputSchema: {
         product_id: z.string().min(1).describe('Primary product ID'),
         relationship_id: z.string().min(1).describe('Relationship definition ID'),

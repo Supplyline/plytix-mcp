@@ -47,8 +47,7 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
     'assets_link',
     {
       title: 'Link Asset',
-      description:
-        'Link an existing asset to a product. Optionally target a specific media attribute.',
+      description: 'Link an existing asset to a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         asset_id: z.string().min(1).describe('The asset ID to link'),

@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
+import type { PlytixProduct } from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
 import type { IdentifierType } from '../lookup/identifier.js';
@@ -27,10 +28,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
       title: 'Smart Product Lookup',
       description:
         'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-        'Uses staged search strategies with confidence scoring. ' +
-        'Returns the best match along with the search plan used. ' +
-        'MPN/MNO searches use PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS (defaults to attributes.mpn/model_no). ' +
-        'Includes overwritten_attributes to show which values are inherited vs explicitly set.',
+        'Returns best match with confidence scoring.',
       inputSchema: {
         identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
         type: z
@@ -111,9 +109,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     {
       title: 'Get Product',
       description:
-        'Get a single product by ID. Returns full product data including ' +
-        'overwritten_attributes (attributes explicitly set, not inherited from family), ' +
-        'product_family_id, and product_type (PARENT/VARIANT/STANDALONE).',
+        'Get a single product by ID with full attributes and inheritance metadata.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
       },
@@ -147,6 +143,99 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // products.get_full - Compound read: product + family + variants + categories + assets
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ product_id: string }>(
+    server,
+    'products_get_full',
+    {
+      title: 'Get Product (Full)',
+      description:
+        'Get product with all related data (family, variants, categories, assets) in one call.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID to fetch'),
+      },
+    },
+    async ({ product_id }) => {
+      try {
+        // Step 1: Fetch the product (needed to extract family ID)
+        const productResult = await client.getProduct(product_id);
+        const product = productResult.data?.[0] as PlytixProduct | undefined;
+
+        if (!product) {
+          return {
+            content: [{ type: 'text', text: `Product not found: ${product_id}` }],
+            isError: true,
+          };
+        }
+
+        // Step 2: Parallel fetch of related data
+        const familyId = product.product_family_id;
+        const [familyResult, variantsResult, categoriesResult, assetsResult] =
+          await Promise.allSettled([
+            familyId ? client.getFamily(familyId) : Promise.resolve(null),
+            client.getProductVariants(product_id),
+            client.getProductCategories(product_id),
+            client.getProductAssets(product_id),
+          ]);
+
+        const errors: string[] = [];
+
+        const family =
+          familyResult.status === 'fulfilled'
+            ? (familyResult.value?.data?.[0] ?? null)
+            : (errors.push(`family: ${familyResult.reason}`), null);
+
+        const variants =
+          variantsResult.status === 'fulfilled'
+            ? (variantsResult.value?.data ?? [])
+            : (errors.push(`variants: ${variantsResult.reason}`), []);
+
+        const categories =
+          categoriesResult.status === 'fulfilled'
+            ? (categoriesResult.value?.data ?? [])
+            : (errors.push(`categories: ${categoriesResult.reason}`), []);
+
+        const assets =
+          assetsResult.status === 'fulfilled'
+            ? (assetsResult.value?.data ?? [])
+            : (errors.push(`assets: ${assetsResult.reason}`), []);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  product,
+                  family,
+                  variants,
+                  categories,
+                  assets,
+                  ...(errors.length > 0 ? { _errors: errors } : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // products.search - Advanced search with filters
   // ─────────────────────────────────────────────────────────────
 
@@ -160,15 +249,12 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_search',
     {
       title: 'Search Products',
-      description:
-        'Search products with filters, pagination, and sorting. ' +
-        'Use attributes.filters tool to discover available filter fields. ' +
-        'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+      description: 'Search products with filters, pagination, and sorting.',
       inputSchema: {
         attributes: z
           .array(z.string())
           .optional()
-          .describe('List of attributes to return (max 50). Custom attrs need "attributes." prefix.'),
+          .describe('Attributes to return (max 50). Prefix custom attrs with "attributes." e.g. "attributes.head_material".'),
         filters: z
           .array(z.any())
           .optional()
@@ -237,8 +323,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     {
       title: 'Find Products',
       description:
-        'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
-        'Simpler than products.search - just specify the fields you know.',
+        'Find products by SKU, MPN, MNO, GTIN, label, or fuzzy text search.',
       inputSchema: {
         sku: z.string().optional().describe('Exact SKU match'),
         mpn: z.string().optional().describe('Manufacturer part number'),
@@ -320,9 +405,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_create',
     {
       title: 'Create Product',
-      description:
-        'Create a new product. Only SKU is required. ' +
-        'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+      description: 'Create a new product (SKU required).',
       inputSchema: {
         sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
         label: z.string().optional().describe('Product label/name'),
@@ -403,9 +486,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_update',
     {
       title: 'Update Product',
-      description:
-        'Update a product. Partial update - only specified fields are changed. ' +
-        'Set an attribute value to null to clear it.',
+      description: 'Partial update — only specified fields are changed.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         label: z.string().optional().describe('New product label/name'),
@@ -482,8 +563,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     {
       title: 'Assign Product Family',
       description:
-        'Assign a product family to a product. Pass empty string to unassign. ' +
-        'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+        'Assign or unassign a product family. Pass empty string to unassign.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         family_id: z
