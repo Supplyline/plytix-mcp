@@ -34,6 +34,20 @@ export function validateAttributeValue(attribute: PlytixAttributeDetail, value: 
     if (invalid.length > 0) {
       return `Invalid option(s) for "${attribute.label}": ${invalid.join(', ')}`;
     }
+    return null;
+  }
+
+  // Unknown type_class with options — do a generic membership check
+  // so new selectable types don't silently bypass validation
+  if (typeof value === 'string') {
+    if (!options.includes(value)) {
+      return `Invalid value for "${attribute.label}" (${attribute.type_class}). Allowed options: ${options.join(', ')}`;
+    }
+  } else if (Array.isArray(value)) {
+    const invalid = value.filter((v) => typeof v === 'string' && !options.includes(v));
+    if (invalid.length > 0) {
+      return `Invalid option(s) for "${attribute.label}" (${attribute.type_class}): ${invalid.join(', ')}`;
+    }
   }
 
   return null;

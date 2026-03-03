@@ -333,7 +333,8 @@ const TOOLS: ToolDefinition[] = [
     name: 'products_update',
     description:
       'Update a product. Partial update - only specified fields are changed. ' +
-      'Set an attribute value to null to clear it.',
+      'Set an attribute value to null to clear it. ' +
+      'NOTE: Does not validate attribute values — use products_set_attribute for validated writes.',
     inputSchema: {
       type: 'object',
       properties: {

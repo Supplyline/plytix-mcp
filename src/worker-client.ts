@@ -43,6 +43,7 @@ export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
   private attributeCache?: Map<string, PlytixAttributeDetail>;
+  private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
 
   constructor(config: WorkerClientConfig) {
     if (!config.apiKey || !config.apiPassword) {
@@ -477,27 +478,54 @@ export class WorkerPlytixClient {
   /**
    * Build attribute cache indexed by label.
    * Per-request scope — no TTL needed (stateless worker).
+   * Deduplicates concurrent callers via shared promise.
    */
   private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
     if (this.attributeCache) return this.attributeCache;
+    if (this.attributeCachePromise) return this.attributeCachePromise;
 
+    this.attributeCachePromise = this.doBuildAttributeCache();
+    try {
+      return await this.attributeCachePromise;
+    } finally {
+      this.attributeCachePromise = undefined;
+    }
+  }
+
+  private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
     const attrIds = await this.searchAttributeIds();
-    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
+
+    if (attrIds.length === 0) {
+      throw new PlytixError(
+        'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
+      );
+    }
+
+    // Fetch in batches to avoid overwhelming Plytix rate limits
+    const BATCH_SIZE = 10;
+    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
+    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
+      const batch = attrIds.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((id) => this.getAttributeById(id))
+      );
+      allResults.push(...batchResults);
+    }
 
     const byLabel = new Map<string, PlytixAttributeDetail>();
     let failures = 0;
-    for (const result of results) {
+    for (const result of allResults) {
       if (result.status === 'fulfilled' && result.value?.label) {
         byLabel.set(result.value.label, result.value);
-      } else if (result.status === 'rejected') {
+      } else {
         failures++;
       }
     }
 
-    // If >20% of fetches failed, don't cache — surface the error
-    if (attrIds.length > 0 && failures > attrIds.length * 0.2) {
+    // If >20% of fetches failed or returned empty, don't cache — surface the error
+    if (failures > attrIds.length * 0.2) {
       throw new PlytixError(
-        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches rejected`
+        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
       );
     }
 
