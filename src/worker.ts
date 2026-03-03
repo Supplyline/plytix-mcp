@@ -13,6 +13,7 @@
 import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
+import { validateAttributeValue } from './utils/validate-attribute.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -230,6 +231,40 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'attributes_get',
+    description:
+      'Get full details for a single attribute by its label (snake_case identifier like "head_material"). ' +
+      'Returns type, options (for dropdowns), groups, and other metadata. ' +
+      'Use this to inspect a specific attribute or get its allowed values.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
+    name: 'attributes_get_options',
+    description:
+      'Get the allowed values (options) for a dropdown or multiselect attribute. ' +
+      'Returns an array of valid option strings. ' +
+      'Use this to validate enum values or sync options to external systems.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
     name: 'attributes_filters',
     description: 'Get all available search filters for product queries.',
     inputSchema: {
@@ -263,6 +298,72 @@ const TOOLS: ToolDefinition[] = [
         attribute_label: { type: 'string', description: 'Attribute label (snake_case)' },
       },
       required: ['product_id', 'attribute_label'],
+    },
+  },
+  {
+    name: 'products_create',
+    description:
+      'Create a new product. Only SKU is required. ' +
+      'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sku: { type: 'string', description: 'Product SKU (required, must be unique)' },
+        label: { type: 'string', description: 'Product label/name' },
+        status: { type: 'string', description: 'Product status' },
+        attributes: {
+          type: 'object',
+          description: 'Custom attributes as key-value pairs (use attribute labels as keys)',
+        },
+        category_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Category IDs to link to this product',
+        },
+        asset_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Asset IDs to link to this product',
+        },
+      },
+      required: ['sku'],
+    },
+  },
+  {
+    name: 'products_update',
+    description:
+      'Update a product. Partial update - only specified fields are changed. ' +
+      'Set an attribute value to null to clear it. ' +
+      'NOTE: Does not validate attribute values — use products_set_attribute for validated writes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        label: { type: 'string', description: 'New product label/name' },
+        status: { type: 'string', description: 'New product status' },
+        attributes: {
+          type: 'object',
+          description: 'Attributes to update (use attribute labels as keys, null to clear)',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_assign_family',
+    description:
+      'Assign a product family to a product. Pass empty string to unassign. ' +
+      'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        family_id: {
+          type: 'string',
+          description: 'The family ID to assign (empty string to unassign)',
+        },
+      },
+      required: ['product_id', 'family_id'],
     },
   },
   {
@@ -313,6 +414,30 @@ const TOOLS: ToolDefinition[] = [
         product_id: { type: 'string', description: 'The product ID' },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'categories_link',
+    description: 'Link an existing category to a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to link' },
+      },
+      required: ['product_id', 'category_id'],
+    },
+  },
+  {
+    name: 'categories_unlink',
+    description: 'Remove a category link from a product. The category itself is not deleted.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to unlink' },
+      },
+      required: ['product_id', 'category_id'],
     },
   },
   {
@@ -629,6 +754,69 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async attributes_get(args, client) {
+    const label = args.label as string;
+    const attr = await client.getAttributeByLabel(label);
+
+    if (!attr) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              id: attr.id,
+              label: attr.label,
+              name: attr.name,
+              type_class: attr.type_class,
+              options: attr.options ?? [],
+              options_count: attr.options?.length ?? 0,
+              groups: attr.groups ?? [],
+              description: attr.description,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async attributes_get_options(args, client) {
+    const label = args.label as string;
+    const options = await client.getAttributeOptions(label);
+
+    if (options === null) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              label,
+              options,
+              count: options.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async products_set_attribute(args, client) {
     const productId = args.product_id as string;
     const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
@@ -648,10 +836,33 @@ const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
+    const validationError = validateAttributeValue(attribute, value);
+    if (validationError) {
+      return {
+        content: [{ type: 'text', text: validationError }],
+        isError: true,
+      };
+    }
+
     const result = await client.updateProduct(productId, {
       attributes: { [attributeLabel]: value },
     });
     const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute write may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
 
     return {
       content: [
@@ -663,7 +874,7 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'set',
-              modified: updated?.modified,
+              modified: updated.modified,
             },
             null,
             2
@@ -684,10 +895,25 @@ const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
     const result = await client.updateProduct(productId, {
       attributes: { [attributeLabel]: null },
     });
     const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute clear may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
 
     return {
       content: [
@@ -699,7 +925,130 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'cleared',
-              modified: updated?.modified,
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_create(args, client) {
+    const sku = args.sku as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+    const categoryIds = args.category_ids as string[] | undefined;
+    const assetIds = args.asset_ids as string[] | undefined;
+
+    const data: Parameters<typeof client.createProduct>[0] = { sku };
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+    if (categoryIds?.length) data.categories = categoryIds.map((id) => ({ id }));
+    if (assetIds?.length) data.assets = assetIds.map((id) => ({ id }));
+
+    const result = await client.createProduct(data);
+    const created = result.data?.[0];
+
+    if (!created?.id) {
+      return {
+        content: [{ type: 'text', text: 'Product creation failed: no ID returned from API' }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: created.id,
+              created: created.created,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_update(args, client) {
+    const productId = args.product_id as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+
+    const data: Parameters<typeof client.updateProduct>[1] = {};
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+
+    if (Object.keys(data).length === 0) {
+      return {
+        content: [{ type: 'text', text: 'No fields provided to update' }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, data);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Product update failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_assign_family(args, client) {
+    const productId = args.product_id as string;
+    const familyId = args.family_id as string;
+
+    const result = await client.assignProductFamily(productId, familyId);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Family assignment failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              family_id: familyId || null,
+              action: familyId ? 'assigned' : 'unassigned',
+              modified: updated.modified,
             },
             null,
             2
@@ -794,6 +1143,63 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               categories: result.data,
               count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_link(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    const result = await client.linkProductCategory(productId, categoryId);
+    const linked = result.data?.[0];
+
+    if (!linked?.id) {
+      return {
+        content: [{ type: 'text', text: `Category link failed: no response for product ${productId}, category ${categoryId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category: { id: linked.id, name: linked.name, path: linked.path },
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_unlink(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    await client.unlinkProductCategory(productId, categoryId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category_id: categoryId,
+              action: 'unlinked',
             },
             null,
             2
