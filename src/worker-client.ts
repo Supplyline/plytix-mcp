@@ -440,10 +440,11 @@ export class WorkerPlytixClient {
    * Paginate all attribute IDs from the v1 search endpoint.
    */
   async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
     const attrIds: string[] = [];
     let page = 1;
 
-    while (true) {
+    while (page <= MAX_PAGES) {
       const result = await this.request<{ id: string }>(
         '/api/v1/attributes/product/search',
         {
@@ -484,10 +485,20 @@ export class WorkerPlytixClient {
     const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
 
     const byLabel = new Map<string, PlytixAttributeDetail>();
+    let failures = 0;
     for (const result of results) {
       if (result.status === 'fulfilled' && result.value?.label) {
         byLabel.set(result.value.label, result.value);
+      } else if (result.status === 'rejected') {
+        failures++;
       }
+    }
+
+    // If >20% of fetches failed, don't cache — surface the error
+    if (attrIds.length > 0 && failures > attrIds.length * 0.2) {
+      throw new PlytixError(
+        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches rejected`
+      );
     }
 
     this.attributeCache = byLabel;

@@ -856,6 +856,13 @@ const toolHandlers: Record<string, ToolHandler> = {
     });
     const updated = result.data?.[0];
 
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute write may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
     return {
       content: [
         {
@@ -866,7 +873,7 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'set',
-              modified: updated?.modified,
+              modified: updated.modified,
             },
             null,
             2
@@ -900,6 +907,13 @@ const toolHandlers: Record<string, ToolHandler> = {
     });
     const updated = result.data?.[0];
 
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute clear may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
     return {
       content: [
         {
@@ -910,7 +924,7 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'cleared',
-              modified: updated?.modified,
+              modified: updated.modified,
             },
             null,
             2
@@ -1144,6 +1158,13 @@ const toolHandlers: Record<string, ToolHandler> = {
     const result = await client.linkProductCategory(productId, categoryId);
     const linked = result.data?.[0];
 
+    if (!linked?.id) {
+      return {
+        content: [{ type: 'text', text: `Category link failed: no response for product ${productId}, category ${categoryId}` }],
+        isError: true,
+      };
+    }
+
     return {
       content: [
         {
@@ -1152,9 +1173,7 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               success: true,
               product_id: productId,
-              category: linked
-                ? { id: linked.id, name: linked.name, path: linked.path }
-                : { id: categoryId },
+              category: { id: linked.id, name: linked.name, path: linked.path },
             },
             null,
             2
