@@ -20,6 +20,7 @@ import type {
   PlytixCategory,
   PlytixFamily,
   PlytixFilterDefinition,
+  PlytixAttributeDetail,
   RateLimitInfo,
 } from './types.js';
 import { PlytixError } from './types.js';
@@ -41,6 +42,7 @@ export interface WorkerClientConfig {
 export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
+  private attributeCache?: Map<string, PlytixAttributeDetail>;
 
   constructor(config: WorkerClientConfig) {
     if (!config.apiKey || !config.apiPassword) {
@@ -259,6 +261,56 @@ export class WorkerPlytixClient {
     });
   }
 
+  async createProduct(data: {
+    sku: string;
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+    categories?: Array<{ id: string }>;
+    assets?: Array<{ id: string }>;
+  }): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>('/api/v2/products', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async assignProductFamily(
+    productId: string,
+    familyId: string
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/family`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ product_family_id: familyId }),
+      }
+    );
+  }
+
+  async linkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ id: categoryId }),
+      }
+    );
+  }
+
+  async unlinkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories/${encodeURIComponent(categoryId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
   async linkProductAsset(
     productId: string,
     assetId: string,
@@ -382,6 +434,82 @@ export class WorkerPlytixClient {
         custom: [],
       };
     }
+  }
+
+  /**
+   * Paginate all attribute IDs from the v1 search endpoint.
+   */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const attrIds: string[] = [];
+    let page = 1;
+
+    while (true) {
+      const result = await this.request<{ id: string }>(
+        '/api/v1/attributes/product/search',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            pagination: { page, page_size: pageSize },
+          }),
+        }
+      );
+
+      if (!result.data || result.data.length === 0) break;
+      attrIds.push(...result.data.map((a) => a.id));
+      if (result.data.length < pageSize) break;
+      page++;
+    }
+
+    return attrIds;
+  }
+
+  /**
+   * Get full attribute details by ID.
+   */
+  async getAttributeById(attrId: string): Promise<PlytixAttributeDetail | null> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attrId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  /**
+   * Build attribute cache indexed by label.
+   * Per-request scope — no TTL needed (stateless worker).
+   */
+  private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    if (this.attributeCache) return this.attributeCache;
+
+    const attrIds = await this.searchAttributeIds();
+    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
+
+    const byLabel = new Map<string, PlytixAttributeDetail>();
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value?.label) {
+        byLabel.set(result.value.label, result.value);
+      }
+    }
+
+    this.attributeCache = byLabel;
+    return byLabel;
+  }
+
+  /**
+   * Get full attribute details by label (snake_case identifier).
+   */
+  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
+    const cache = await this.buildAttributeCache();
+    return cache.get(label) ?? null;
+  }
+
+  /**
+   * Get options for a dropdown/multiselect attribute by label.
+   * Returns null if attribute not found, empty array if no options.
+   */
+  async getAttributeOptions(label: string): Promise<string[] | null> {
+    const attr = await this.getAttributeByLabel(label);
+    if (!attr) return null;
+    return attr.options ?? [];
   }
 
   // ─────────────────────────────────────────────────────────────
