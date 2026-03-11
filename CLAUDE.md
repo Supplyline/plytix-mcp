@@ -26,20 +26,22 @@ npm run typecheck    # Type check without building
 src/
   index.ts              # MCP server entry point
   client.ts             # Enhanced Plytix API client
+  worker-client.ts      # Request-scoped Plytix client for the Cloudflare Worker
   types.ts              # TypeScript types for Plytix API
+  worker.ts             # Cloudflare Worker MCP entry point
   lookup/
     identifier.ts       # Identifier type detection (ID, SKU, MPN, GTIN, label)
     lookup.ts           # Smart product lookup with staged search
     index.ts            # Barrel export
   tools/
     products.ts         # Product tools (lookup, get, search, find, writes)
-    families.ts         # Family tools (list, get)
-    attributes.ts       # Attribute metadata tools
+    families.ts         # Family tools (list, get, create, attribute membership)
+    attributes.ts       # Attribute metadata + filter discovery tools
     product-attributes.ts # Atomic product attribute write tools
-    assets.ts           # Asset list/link/unlink tools
-    categories.ts       # Category list/link/unlink tools
-    variants.ts         # Variant list/resync tools
-    relationships.ts    # Product relationship write tools
+    assets.ts           # Asset get/search/update + product asset link tools
+    categories.ts       # Category search + product category link tools
+    variants.ts         # Variant lifecycle tools
+    relationships.ts    # Relationship discovery + product relationship write tools
   supplyline/           # Supplyline-specific customizations
     index.ts            # Supplyline tool registration
 ```
@@ -50,37 +52,57 @@ src/
 
 | Tool | Description |
 |------|-------------|
-| `products.lookup` | Smart lookup by any identifier (auto-detects type) |
-| `products.get` | Get single product by ID (includes `overwritten_attributes`) |
-| `products.search` | Advanced search with filters, pagination, sorting |
-| `products.find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
-| `families.list` | List/search product families |
-| `families.get` | Get single family with linked attributes |
-| `attributes.list` | List all attributes (system + custom) |
-| `attributes.get` | Get full details for a single attribute by label |
-| `attributes.get_options` | Get allowed values for a dropdown/multiselect attribute |
-| `attributes.filters` | Get available search filters |
-| `assets.list` | List assets linked to a product |
-| `categories.list` | List categories linked to a product |
-| `variants.list` | List variants for a product |
+| `products_lookup` | Smart lookup by any identifier (auto-detects type) |
+| `products_get` | Get a single product by ID (includes `overwritten_attributes`) |
+| `products_search` | Advanced product search with filters, pagination, and sorting |
+| `products_find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
+| `families_list` | List or search product families |
+| `families_get` | Get one product family |
+| `families_list_attributes` | List attributes directly linked to a family |
+| `families_list_all_attributes` | List direct + inherited family attributes |
+| `attributes_list` | List all product attributes (system + custom) |
+| `attributes_get` | Get full details for a single attribute by label |
+| `attributes_get_options` | Get allowed values for a dropdown/multiselect attribute |
+| `attributes_filters` | Deprecated alias for product filter discovery |
+| `products_filters` | Get product search filter metadata |
+| `assets_filters` | Get asset search filter metadata |
+| `relationships_filters` | Get relationship search filter metadata |
+| `assets_get` | Get a single asset by ID |
+| `assets_search` | Search account assets |
+| `assets_list` | List assets linked to a product |
+| `categories_search` | Search existing product categories |
+| `categories_list` | List categories linked to a product |
+| `variants_list` | List variants for a product |
+| `relationships_get` | Get a relationship definition |
+| `relationships_search` | Search relationship definitions |
+| `identifier_detect` | Detect identifier type from format |
+| `identifier_normalize` | Normalize identifier formatting for comparison |
+| `match_score` | Score how well an identifier matches product data |
 
 ### Write Operations
 
 | Tool | Description |
 |------|-------------|
-| `products.create` | Create a new product (SKU required) |
-| `products.update` | Update product attributes (PATCH - partial update) |
-| `products.assign_family` | Assign/unassign family (⚠️ may cause data loss) |
-| `products.set_attribute` | Set one product attribute atomically |
-| `products.clear_attribute` | Clear one product attribute atomically |
-| `assets.link` | Link existing asset to product |
-| `assets.unlink` | Unlink asset from product |
-| `categories.link` | Link existing category to product |
-| `categories.unlink` | Unlink category from product |
-| `variants.resync` | Restore variant attributes to inherit from parent |
-| `relationships.link_product` | Link one related product row |
-| `relationships.unlink_product` | Unlink one related product row |
-| `relationships.set_quantity` | Update quantity for one related product row |
+| `products_create` | Create a new product (SKU required) |
+| `products_update` | Update product fields and attributes (PATCH) |
+| `products_assign_family` | Assign or unassign family (may cause data loss) |
+| `products_set_attribute` | Set one product attribute atomically |
+| `products_clear_attribute` | Clear one product attribute atomically |
+| `families_create` | Create a new product family |
+| `families_link_attribute` | Link one or more attributes to a family |
+| `families_unlink_attribute` | Unlink one or more attributes from a family |
+| `assets_update` | Update asset metadata (`filename`, `categories` only) |
+| `assets_link` | Link an existing asset to a product |
+| `assets_unlink` | Unlink an asset from a product |
+| `categories_link` | Link an existing category to a product |
+| `categories_unlink` | Unlink an existing category from a product |
+| `variants_create` | Create a new variant beneath a parent product |
+| `variants_link` | Convert an existing product into a variant |
+| `variants_unlink` | Detach a variant without deleting the product |
+| `variants_resync` | Restore variant attributes to inherit from parent |
+| `relationships_link_product` | Link one related product row |
+| `relationships_unlink_product` | Unlink one related product row |
+| `relationships_set_quantity` | Update quantity for one related product row |
 
 ## Smart Lookup System
 
@@ -138,8 +160,8 @@ Optional:
 - `name` = human-readable name (e.g., "Head Material")
 
 **API versions:**
-- Products, Assets, Variants, Categories: v2 API (`/api/v2/...`)
-- Families, Filters: v1 API (`/api/v1/...`)
+- Product reads/writes, product-linked assets/categories, relationship mutations, and most variant operations use v2 (`/api/v2/...`)
+- Account-level assets, category discovery, relationship definitions, families, filters, and attribute metadata use v1 (`/api/v1/...`)
 
 **Attribute limits:**
 - v2 search: max 50 attributes
@@ -171,12 +193,12 @@ Related fields:
 
 ## Session Notes
 
-_Last updated: 2025-01-22_
+_Last updated: 2026-03-11_
 
 ### Recent Changes
-- Added write tools: `products.create`, `products.update`, `products.assign_family`
-- Added category tools: `categories.link`, `categories.unlink`
-- Client methods for all write operations
+- Added variant lifecycle tools: `variants_create`, `variants_link`, `variants_unlink`
+- Added asset read/search/update tools and split filter discovery by resource
+- Added category search, relationship discovery, and expanded family operations
 
 ### v0.2.0 (2025-01-16)
 - Ported smart lookup system from archived codebase

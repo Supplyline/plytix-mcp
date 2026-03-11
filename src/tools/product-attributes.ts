@@ -20,9 +20,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     'products_set_attribute',
     {
       title: 'Set Product Attribute',
-      description:
-        'Set a single product attribute value atomically. ' +
-        'Use snake_case labels (e.g., "head_material"). The "attributes." prefix is optional.',
+      description: 'Set one product attribute.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         attribute_label: z
@@ -111,9 +109,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     'products_clear_attribute',
     {
       title: 'Clear Product Attribute',
-      description:
-        'Clear a single product attribute value atomically by setting it to null. ' +
-        'Use snake_case labels (e.g., "head_material"). The "attributes." prefix is optional.',
+      description: 'Clear one product attribute.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         attribute_label: z

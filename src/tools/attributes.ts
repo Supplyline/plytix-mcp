@@ -20,10 +20,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     'attributes_list',
     {
       title: 'List Attributes',
-      description:
-        'List all available product attributes (system and custom). ' +
-        'Returns attribute keys, types, labels, and options for dropdown fields. ' +
-        'Use this to discover what attributes exist and their data types.',
+      description: 'List product attributes.',
       inputSchema: {
         include_options: z
           .boolean()
@@ -38,9 +35,9 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
         const result: Record<string, unknown> = {
           system_attributes: system,
           custom_attributes: custom.map((attr) => ({
-            key: attr.field,
+            key: attr.key ?? attr.field,
             label: attr.label,
-            type: attr.type,
+            type: attr.filter_type ?? attr.type,
             ...(include_options && attr.options ? { options: attr.options } : {}),
           })),
           summary: {
@@ -76,10 +73,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     'attributes_get',
     {
       title: 'Get Attribute',
-      description:
-        'Get full details for a single attribute by its label (snake_case identifier like "head_material"). ' +
-        'Returns type, options (for dropdowns), groups, and other metadata. ' +
-        'Use this to inspect a specific attribute or get its allowed values.',
+      description: 'Get one attribute.',
       inputSchema: {
         label: z
           .string()
@@ -141,10 +135,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     'attributes_get_options',
     {
       title: 'Get Attribute Options',
-      description:
-        'Get the allowed values (options) for a dropdown or multiselect attribute. ' +
-        'Returns an array of valid option strings. ' +
-        'Use this to validate enum values or sync options to external systems.',
+      description: 'List allowed values for an attribute.',
       inputSchema: {
         label: z
           .string()
@@ -193,18 +184,15 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
   );
 
   // ─────────────────────────────────────────────────────────────
-  // attributes.filters - Get available search filters
+  // attributes.filters - Deprecated alias for product search filters
   // ─────────────────────────────────────────────────────────────
 
   registerTool<Record<string, never>>(
     server,
     'attributes_filters',
     {
-      title: 'Get Search Filters',
-      description:
-        'Get all available search filters for product queries. ' +
-        'Returns filterable fields, their types, and available operators. ' +
-        'Use this to understand how to construct advanced search queries.',
+      title: 'Get Search Filters (Deprecated)',
+      description: 'Deprecated alias for product filters.',
       inputSchema: {},
     },
     async () => {
@@ -217,6 +205,10 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
               type: 'text',
               text: JSON.stringify(
                 {
+                  deprecated: true,
+                  message: 'Use products_filters, assets_filters, or relationships_filters instead.',
+                  replacement_tools: ['products_filters', 'assets_filters', 'relationships_filters'],
+                  resource: 'products',
                   filters: result.data,
                   count: result.data?.length ?? 0,
                 },
@@ -232,6 +224,144 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
             {
               type: 'text',
               text: `Error fetching filters: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products_filters - Product filter discovery
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<Record<string, never>>(
+    server,
+    'products_filters',
+    {
+      title: 'Product Search Filters',
+      description: 'List product search filters.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await client.getAvailableFilters();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  resource: 'products',
+                  filters: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching product filters: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // assets_filters - Asset filter discovery
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<Record<string, never>>(
+    server,
+    'assets_filters',
+    {
+      title: 'Asset Search Filters',
+      description: 'List asset search filters.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await client.getAssetFilters();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  resource: 'assets',
+                  filters: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching asset filters: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // relationships_filters - Relationship filter discovery
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<Record<string, never>>(
+    server,
+    'relationships_filters',
+    {
+      title: 'Relationship Search Filters',
+      description: 'List relationship search filters.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await client.getRelationshipFilters();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  resource: 'relationships',
+                  filters: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching relationship filters: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
           isError: true,

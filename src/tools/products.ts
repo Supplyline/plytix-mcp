@@ -25,12 +25,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_lookup',
     {
       title: 'Smart Product Lookup',
-      description:
-        'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-        'Uses staged search strategies with confidence scoring. ' +
-        'Returns the best match along with the search plan used. ' +
-        'MPN/MNO searches use PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS (defaults to attributes.mpn/model_no). ' +
-        'Includes overwritten_attributes to show which values are inherited vs explicitly set.',
+      description: 'Find the best product match for an identifier.',
       inputSchema: {
         identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
         type: z
@@ -110,10 +105,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_get',
     {
       title: 'Get Product',
-      description:
-        'Get a single product by ID. Returns full product data including ' +
-        'overwritten_attributes (attributes explicitly set, not inherited from family), ' +
-        'product_family_id, and product_type (PARENT/VARIANT/STANDALONE).',
+      description: 'Get one product by ID.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
       },
@@ -160,10 +152,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_search',
     {
       title: 'Search Products',
-      description:
-        'Search products with filters, pagination, and sorting. ' +
-        'Use attributes.filters tool to discover available filter fields. ' +
-        'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+      description: 'Search products with filters.',
       inputSchema: {
         attributes: z
           .array(z.string())
@@ -236,9 +225,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_find',
     {
       title: 'Find Products',
-      description:
-        'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
-        'Simpler than products.search - just specify the fields you know.',
+      description: 'Find products by common identifiers.',
       inputSchema: {
         sku: z.string().optional().describe('Exact SKU match'),
         mpn: z.string().optional().describe('Manufacturer part number'),
@@ -320,9 +307,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_create',
     {
       title: 'Create Product',
-      description:
-        'Create a new product. Only SKU is required. ' +
-        'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+      description: 'Create a product.',
       inputSchema: {
         sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
         label: z.string().optional().describe('Product label/name'),
@@ -403,9 +388,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_update',
     {
       title: 'Update Product',
-      description:
-        'Update a product. Partial update - only specified fields are changed. ' +
-        'Set an attribute value to null to clear it.',
+      description: 'Update a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         label: z.string().optional().describe('New product label/name'),
@@ -481,9 +464,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_assign_family',
     {
       title: 'Assign Product Family',
-      description:
-        'Assign a product family to a product. Pass empty string to unassign. ' +
-        'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+      description: 'Assign or unassign a family.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         family_id: z

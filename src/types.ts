@@ -116,6 +116,16 @@ export interface PlytixRelationship {
   }>;
 }
 
+export interface PlytixRelationshipDefinition {
+  id: string;
+  label: string;
+  name?: string;
+  symmetrical?: boolean;
+  created?: string;
+  modified?: string;
+  [key: string]: unknown;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Families
 // ─────────────────────────────────────────────────────────────
@@ -131,6 +141,7 @@ export interface PlytixFamily {
 }
 
 export interface PlytixFamilyAttribute {
+  id?: string;
   label: string;          // e.g., "head_material" (snake_case identifier)
   name: string;           // e.g., "Head Material" (human-readable)
   type?: string;          // e.g., "dropdown", "text", "number"
@@ -139,6 +150,7 @@ export interface PlytixFamilyAttribute {
   inherited?: boolean;    // whether inherited from parent family
   default_value?: unknown;
   options?: unknown[];    // for dropdown/multiselect types
+  [key: string]: unknown;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -206,10 +218,15 @@ export interface PlytixAttributeDetail {
 }
 
 export interface PlytixFilterDefinition {
-  field: string;
-  type: string;
+  key?: string;
+  field?: string;
+  type?: string;
+  filter_type?: string;
   label?: string;
+  name?: string;
+  operators?: FilterOperator[];
   options?: unknown[];
+  [key: string]: unknown;
 }
 
 // ─────────────────────────────────────────────────────────────

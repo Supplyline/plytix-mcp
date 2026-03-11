@@ -19,7 +19,9 @@ import type {
   PlytixAsset,
   PlytixCategory,
   PlytixFamily,
+  PlytixFamilyAttribute,
   PlytixFilterDefinition,
+  PlytixRelationshipDefinition,
   RateLimitInfo,
 } from './types.js';
 import { PlytixError } from './types.js';
@@ -347,12 +349,68 @@ export class WorkerPlytixClient {
     );
   }
 
+  async createFamily(data: {
+    name: string;
+    parent_id?: string;
+  }): Promise<PlytixResult<PlytixFamily>> {
+    return this.request<PlytixFamily>('/api/v1/product_families', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async linkFamilyAttributes(
+    familyId: string,
+    attributeLabels: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/link`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ attributes: attributeLabels }),
+      }
+    );
+  }
+
+  async unlinkFamilyAttributes(
+    familyId: string,
+    attributeLabels: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/unlink`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ attributes: attributeLabels }),
+      }
+    );
+  }
+
+  async getFamilyAttributes(familyId: string): Promise<PlytixResult<PlytixFamilyAttribute>> {
+    return this.request<PlytixFamilyAttribute>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes`
+    );
+  }
+
+  async getFamilyAllAttributes(familyId: string): Promise<PlytixResult<PlytixFamilyAttribute>> {
+    return this.request<PlytixFamilyAttribute>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/all_attributes`
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Attributes & Filters
   // ─────────────────────────────────────────────────────────────
 
   async getAvailableFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
-    return this.request<PlytixFilterDefinition>('/api/v1/products/search/filters');
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/product');
+  }
+
+  async getAssetFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/asset');
+  }
+
+  async getRelationshipFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/relationships');
   }
 
   async getProductAttributes(): Promise<{ system: string[]; custom: PlytixFilterDefinition[] }> {
@@ -364,11 +422,12 @@ export class WorkerPlytixClient {
 
       if (filtersResult.data) {
         for (const filter of filtersResult.data) {
-          if (filter.field) {
-            if (filter.field.startsWith('attributes.')) {
+          const field = filter.key ?? filter.field;
+          if (field) {
+            if (field.startsWith('attributes.')) {
               custom.push(filter);
             } else {
-              system.push(filter.field);
+              system.push(field);
             }
           }
         }
@@ -385,19 +444,103 @@ export class WorkerPlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Assets (v2 API)
+  // Assets (v1 API for account-level asset discovery and metadata)
   // ─────────────────────────────────────────────────────────────
 
   async searchAssets(body?: PlytixSearchBody): Promise<PlytixResult<PlytixAsset>> {
-    return this.request<PlytixAsset>('/api/v2/assets/search', {
+    return this.request<PlytixAsset>('/api/v1/assets/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async getAsset(assetId: string): Promise<PlytixResult<PlytixAsset>> {
+    return this.request<PlytixAsset>(`/api/v1/assets/${encodeURIComponent(assetId)}`);
+  }
+
+  async updateAsset(
+    assetId: string,
+    data: { filename?: string; categories?: string[] }
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const body: {
+      filename?: string;
+      categories?: Array<{ id: string }>;
+    } = {};
+
+    if (data.filename !== undefined) {
+      body.filename = data.filename;
+    }
+
+    if (data.categories !== undefined) {
+      body.categories = data.categories.map((id) => ({ id }));
+    }
+
+    return this.request<PlytixAsset>(`/api/v1/assets/${encodeURIComponent(assetId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async searchCategories(body?: PlytixSearchBody): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>('/api/v1/categories/product/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async getRelationship(
+    relationshipId: string
+  ): Promise<PlytixResult<PlytixRelationshipDefinition>> {
+    return this.request<PlytixRelationshipDefinition>(
+      `/api/v1/relationships/${encodeURIComponent(relationshipId)}`
+    );
+  }
+
+  async searchRelationships(
+    body?: PlytixSearchBody
+  ): Promise<PlytixResult<PlytixRelationshipDefinition>> {
+    return this.request<PlytixRelationshipDefinition>('/api/v1/relationships/search', {
       method: 'POST',
       body: JSON.stringify(body ?? {}),
     });
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Variants (v1 API - write operations)
+  // Variants
   // ─────────────────────────────────────────────────────────────
+
+  async createVariant(
+    parentProductId: string,
+    data: { sku: string; label?: string; attributes?: Record<string, unknown> }
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variants`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ variant: data }),
+      }
+    );
+  }
+
+  async linkVariant(
+    parentProductId: string,
+    variantProductId: string
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variant/${encodeURIComponent(variantProductId)}`,
+      { method: 'POST' }
+    );
+  }
+
+  async unlinkVariant(
+    parentProductId: string,
+    variantProductId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variant/${encodeURIComponent(variantProductId)}`,
+      { method: 'DELETE' }
+    );
+  }
 
   async resyncVariants(
     parentProductId: string,
@@ -405,7 +548,7 @@ export class WorkerPlytixClient {
     variantIds: string[]
   ): Promise<PlytixResult<void>> {
     return this.request<void>(
-      `/api/v1/products/${encodeURIComponent(parentProductId)}/variants/resync`,
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variants/resync`,
       {
         method: 'POST',
         body: JSON.stringify({

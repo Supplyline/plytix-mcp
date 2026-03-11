@@ -20,9 +20,7 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
     'families_list',
     {
       title: 'List Product Families',
-      description:
-        'List or search product families. Returns family IDs, names, and linked attributes. ' +
-        'Use this to understand the family structure for inheritance tracking.',
+      description: 'List product families.',
       inputSchema: {
         query: z.string().optional().describe('Search query to filter families by name'),
         page: z.number().int().positive().default(1).describe('Page number'),
@@ -79,9 +77,7 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
     'families_get',
     {
       title: 'Get Product Family',
-      description:
-        'Get a single product family by ID. Returns the family name, linked attributes, ' +
-        'and parent family (if any) for understanding inheritance.',
+      description: 'Get one product family.',
       inputSchema: {
         family_id: z.string().min(1).describe('The product family ID'),
       },
@@ -106,6 +102,263 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
             {
               type: 'text',
               text: `Error fetching family: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_create - Create a product family
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ name: string; parent_id?: string }>(
+    server,
+    'families_create',
+    {
+      title: 'Create Product Family',
+      description: 'Create a product family.',
+      inputSchema: {
+        name: z.string().min(1).describe('Name for the new family'),
+        parent_id: z.string().optional().describe('Optional parent family ID'),
+      },
+    },
+    async ({ name, parent_id }) => {
+      try {
+        const result = await client.createFamily({
+          name,
+          ...(parent_id !== undefined ? { parent_id } : {}),
+        });
+        const family = result.data?.[0];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  action: 'created',
+                  family: family ? { id: family.id, name: family.name } : undefined,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error creating family: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_link_attribute - Link one or more attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string; attribute_labels: string[] }>(
+    server,
+    'families_link_attribute',
+    {
+      title: 'Link Attributes to Family',
+      description: 'Link attributes to a family.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+        attribute_labels: z
+          .array(z.string())
+          .min(1)
+          .describe('Attribute labels to link to the family'),
+      },
+    },
+    async ({ family_id, attribute_labels }) => {
+      try {
+        await client.linkFamilyAttributes(family_id, attribute_labels);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  action: 'linked',
+                  family_id,
+                  attribute_labels,
+                  count: attribute_labels.length,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error linking family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_unlink_attribute - Unlink one or more attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string; attribute_labels: string[] }>(
+    server,
+    'families_unlink_attribute',
+    {
+      title: 'Unlink Attributes from Family',
+      description: 'Unlink attributes from a family.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+        attribute_labels: z
+          .array(z.string())
+          .min(1)
+          .describe('Attribute labels to unlink from the family'),
+      },
+    },
+    async ({ family_id, attribute_labels }) => {
+      try {
+        await client.unlinkFamilyAttributes(family_id, attribute_labels);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  action: 'unlinked',
+                  family_id,
+                  attribute_labels,
+                  count: attribute_labels.length,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error unlinking family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_list_attributes - Directly linked family attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string }>(
+    server,
+    'families_list_attributes',
+    {
+      title: 'List Family Attributes',
+      description: 'List direct family attributes.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+      },
+    },
+    async ({ family_id }) => {
+      try {
+        const result = await client.getFamilyAttributes(family_id);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  family_id,
+                  attributes: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error listing family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_list_all_attributes - Direct + inherited family attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string }>(
+    server,
+    'families_list_all_attributes',
+    {
+      title: 'List All Family Attributes',
+      description: 'List all family attributes.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+      },
+    },
+    async ({ family_id }) => {
+      try {
+        const result = await client.getFamilyAllAttributes(family_id);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  family_id,
+                  attributes: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error listing all family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
           isError: true,

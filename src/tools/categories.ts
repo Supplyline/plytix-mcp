@@ -10,13 +10,67 @@ import type { PlytixClient } from '../client.js';
 import { registerTool } from './register.js';
 
 export function registerCategoryTools(server: McpServer, client: PlytixClient) {
+  // SEARCH categories
+  registerTool<{ query?: string; pagination?: { page?: number; page_size?: number } }>(
+    server,
+    'categories_search',
+    {
+      title: 'Search Categories',
+      description: 'Search product categories.',
+      inputSchema: {
+        query: z.string().optional().describe('Search query to filter categories by name'),
+        pagination: z
+          .object({
+            page: z.number().int().positive().optional(),
+            page_size: z.number().int().positive().max(100).optional(),
+          })
+          .optional()
+          .describe('Pagination options'),
+      },
+    },
+    async ({ query, pagination }) => {
+      try {
+        const result = await client.searchCategories({
+          ...(pagination !== undefined ? { pagination } : {}),
+          ...(query ? { filters: [[{ field: 'name', operator: 'like', value: query }]] } : {}),
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  categories: result.data,
+                  pagination: result.pagination,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error searching categories: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // LIST product categories
   registerTool<{ product_id: string }>(
     server,
     'categories_list',
     {
       title: 'List Categories',
-      description: 'List categories linked to a product (Plytix v2)',
+      description: 'List categories linked to a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch categories for'),
       },
@@ -47,7 +101,7 @@ export function registerCategoryTools(server: McpServer, client: PlytixClient) {
     'categories_link',
     {
       title: 'Link Category',
-      description: 'Link an existing category to a product',
+      description: 'Link a category to a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         category_id: z.string().min(1).describe('The category ID to link'),
@@ -96,7 +150,7 @@ export function registerCategoryTools(server: McpServer, client: PlytixClient) {
     'categories_unlink',
     {
       title: 'Unlink Category',
-      description: 'Remove a category link from a product. The category itself is not deleted.',
+      description: 'Unlink a category from a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         category_id: z.string().min(1).describe('The category ID to unlink'),
