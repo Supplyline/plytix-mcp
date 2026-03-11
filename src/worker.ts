@@ -164,7 +164,7 @@ const TOOLS: ToolDefinition[] = [
         attributes: {
           type: 'array',
           items: { type: 'string' },
-          description: 'List of attributes to return (max 50)',
+          description: 'Attributes to return (max 50). Prefix custom attrs with "attributes." e.g. "attributes.head_material".',
         },
         filters: {
           type: 'array',
@@ -616,26 +616,27 @@ const toolHandlers: Record<string, ToolHandler> = {
       ]);
 
     const errors: string[] = [];
+    const errMsg = (e: unknown) => e instanceof Error ? e.message : String(e);
 
     const family =
       familyResult.status === 'fulfilled'
         ? (familyResult.value?.data?.[0] ?? null)
-        : (errors.push(`family: ${familyResult.reason}`), null);
+        : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
 
     const variants =
       variantsResult.status === 'fulfilled'
         ? (variantsResult.value?.data ?? [])
-        : (errors.push(`variants: ${variantsResult.reason}`), []);
+        : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
 
     const categories =
       categoriesResult.status === 'fulfilled'
         ? (categoriesResult.value?.data ?? [])
-        : (errors.push(`categories: ${categoriesResult.reason}`), []);
+        : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
 
     const assets =
       assetsResult.status === 'fulfilled'
         ? (assetsResult.value?.data ?? [])
-        : (errors.push(`assets: ${assetsResult.reason}`), []);
+        : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
 
     return {
       content: [
