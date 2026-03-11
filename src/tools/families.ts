@@ -20,9 +20,7 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
     'families_list',
     {
       title: 'List Product Families',
-      description:
-        'List or search product families. Returns family IDs, names, and linked attributes. ' +
-        'Use this to understand the family structure for inheritance tracking.',
+      description: 'List or search product families with linked attributes.',
       inputSchema: {
         query: z.string().optional().describe('Search query to filter families by name'),
         page: z.number().int().positive().default(1).describe('Page number'),
@@ -80,8 +78,7 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
     {
       title: 'Get Product Family',
       description:
-        'Get a single product family by ID. Returns the family name, linked attributes, ' +
-        'and parent family (if any) for understanding inheritance.',
+        'Get a single product family by ID with linked attributes and parent info.',
       inputSchema: {
         family_id: z.string().min(1).describe('The product family ID'),
       },

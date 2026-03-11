@@ -169,19 +169,6 @@ Related fields:
 - Integration tests: `test-integration.js` (requires credentials)
 - MCP handshake: `test-mcp-client.js`
 
-## Session Notes
+---
 
-_Last updated: 2025-01-22_
-
-### Recent Changes
-- Added write tools: `products.create`, `products.update`, `products.assign_family`
-- Added category tools: `categories.link`, `categories.unlink`
-- Client methods for all write operations
-
-### v0.2.0 (2025-01-16)
-- Ported smart lookup system from archived codebase
-- Added families tools (list, get)
-- Added attributes tools (list, filters)
-- Enhanced products.get to include overwritten_attributes
-- Added vitest test infrastructure
-- Improved PlytixClient with rate limiting and retry logic
+*Last updated: January 2025*

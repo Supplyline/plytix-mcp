@@ -37,9 +37,7 @@ export function registerIdentifierTools(server: McpServer) {
     {
       title: 'Detect Identifier Type',
       description:
-        'Detect the type of a product identifier based on format patterns. ' +
-        'Returns type (id, sku, mpn, mno, gtin, label) with confidence score. ' +
-        'Use this to understand what kind of identifier you have before searching.',
+        'Detect identifier type (ID, SKU, MPN, GTIN, label) with confidence score.',
       inputSchema: {
         value: z.string().describe('The identifier value to analyze'),
       },
@@ -77,9 +75,7 @@ export function registerIdentifierTools(server: McpServer) {
     {
       title: 'Normalize Identifier',
       description:
-        'Normalize a product identifier for comparison by removing special ' +
-        'characters and converting to uppercase. Use this when comparing ' +
-        'identifiers that may have different formatting.',
+        'Normalize an identifier for comparison (strip special chars, uppercase).',
       inputSchema: {
         value: z.string().describe('The identifier value to normalize'),
       },
@@ -115,9 +111,7 @@ export function registerIdentifierTools(server: McpServer) {
     {
       title: 'Score Match',
       description:
-        'Calculate match confidence between an identifier and product data. ' +
-        'Checks common fields (sku, label, gtin, mpn) and returns the best match. ' +
-        'Use this to verify if a product is a good match for an identifier.',
+        'Score match confidence between an identifier and product data fields.',
       inputSchema: {
         identifier: z.string().describe('The identifier to match'),
         product_data: z

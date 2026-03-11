@@ -21,9 +21,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     {
       title: 'List Attributes',
       description:
-        'List all available product attributes (system and custom). ' +
-        'Returns attribute keys, types, labels, and options for dropdown fields. ' +
-        'Use this to discover what attributes exist and their data types.',
+        'List all product attributes (system and custom) with types and dropdown options.',
       inputSchema: {
         include_options: z
           .boolean()
@@ -77,9 +75,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     {
       title: 'Get Attribute',
       description:
-        'Get full details for a single attribute by its label (snake_case identifier like "head_material"). ' +
-        'Returns type, options (for dropdowns), groups, and other metadata. ' +
-        'Use this to inspect a specific attribute or get its allowed values.',
+        'Get full details for one attribute by label — type, options, groups.',
       inputSchema: {
         label: z
           .string()
@@ -142,9 +138,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     {
       title: 'Get Attribute Options',
       description:
-        'Get the allowed values (options) for a dropdown or multiselect attribute. ' +
-        'Returns an array of valid option strings. ' +
-        'Use this to validate enum values or sync options to external systems.',
+        'Get allowed values for a dropdown or multiselect attribute.',
       inputSchema: {
         label: z
           .string()
@@ -202,9 +196,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
     {
       title: 'Get Search Filters',
       description:
-        'Get all available search filters for product queries. ' +
-        'Returns filterable fields, their types, and available operators. ' +
-        'Use this to understand how to construct advanced search queries.',
+        'Get available search filter fields, types, and operators.',
       inputSchema: {},
     },
     async () => {
