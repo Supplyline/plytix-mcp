@@ -103,9 +103,7 @@ const TOOLS: ToolDefinition[] = [
     name: 'products_lookup',
     description:
       'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-      'Uses staged search strategies with confidence scoring. ' +
-      'Returns the best match along with the search plan used. ' +
-      'MPN/MNO searches use attributes.mpn/model_no by default.',
+      'Returns best match with confidence scoring.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,8 +128,22 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'products_get',
     description:
-      'Get a single product by ID. Returns full product data including ' +
-      'overwritten_attributes (attributes explicitly set, not inherited from family).',
+      'Get a single product by ID with full attributes and inheritance metadata.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: {
+          type: 'string',
+          description: 'The product ID to fetch',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_get_full',
+    description:
+      'Get product with all related data (family, variants, categories, assets) in one call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -145,9 +157,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_search',
-    description:
-      'Search products with filters, pagination, and sorting. ' +
-      'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+    description: 'Search products with filters, pagination, and sorting.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -176,8 +186,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'products_find',
     description:
-      'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
-      'Simpler than products_search - just specify the fields you know.',
+      'Find products by SKU, MPN, MNO, GTIN, label, or fuzzy text search.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -193,7 +202,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'families_list',
-    description: 'List or search product families. Returns family IDs, names, and linked attributes.',
+    description: 'List or search product families with linked attributes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -205,7 +214,8 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'families_get',
-    description: 'Get a single product family by ID. Returns the family name and linked attributes.',
+    description:
+      'Get a single product family by ID with linked attributes and parent info.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -217,8 +227,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'attributes_list',
     description:
-      'List all available product attributes (system and custom). ' +
-      'Returns attribute keys, types, labels, and options for dropdown fields.',
+      'List all product attributes (system and custom) with types and dropdown options.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -233,9 +242,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'attributes_get',
     description:
-      'Get full details for a single attribute by its label (snake_case identifier like "head_material"). ' +
-      'Returns type, options (for dropdowns), groups, and other metadata. ' +
-      'Use this to inspect a specific attribute or get its allowed values.',
+      'Get full details for one attribute by label — type, options, groups.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -250,9 +257,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'attributes_get_options',
     description:
-      'Get the allowed values (options) for a dropdown or multiselect attribute. ' +
-      'Returns an array of valid option strings. ' +
-      'Use this to validate enum values or sync options to external systems.',
+      'Get allowed values for a dropdown or multiselect attribute.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -275,8 +280,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'products_set_attribute',
     description:
-      'Set a single product attribute value atomically. ' +
-      'Use snake_case labels (e.g., "head_material").',
+      'Set a single product attribute value. Validates against attribute schema.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -289,8 +293,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_clear_attribute',
-    description:
-      'Clear a single product attribute value atomically by setting it to null.',
+    description: 'Clear a single product attribute value (set to null).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -302,9 +305,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_create',
-    description:
-      'Create a new product. Only SKU is required. ' +
-      'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+    description: 'Create a new product (SKU required).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -331,10 +332,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_update',
-    description:
-      'Update a product. Partial update - only specified fields are changed. ' +
-      'Set an attribute value to null to clear it. ' +
-      'NOTE: Does not validate attribute values — use products_set_attribute for validated writes.',
+    description: 'Partial update — only specified fields are changed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -352,8 +350,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'products_assign_family',
     description:
-      'Assign a product family to a product. Pass empty string to unassign. ' +
-      'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+      'Assign or unassign a product family. Pass empty string to unassign.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -368,7 +365,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'assets_list',
-    description: 'List assets linked to a product.',
+    description: 'List assets linked to a product (Plytix v2)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -395,7 +392,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'assets_unlink',
-    description: 'Unlink an asset from a product.',
+    description: 'Remove an asset link from a product. The asset itself is not deleted.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -407,7 +404,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'categories_list',
-    description: 'List categories linked to a product.',
+    description: 'List categories linked to a product (Plytix v2)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -418,7 +415,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'categories_link',
-    description: 'Link an existing category to a product.',
+    description: 'Link an existing category to a product',
     inputSchema: {
       type: 'object',
       properties: {
@@ -442,7 +439,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'variants_list',
-    description: 'List variants for a product.',
+    description: 'List variants linked to a product (Plytix v2)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -454,8 +451,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'variants_resync',
     description:
-      'Resync variant attributes to inherit values from the parent product. ' +
-      'Restores overwritten attributes on specified variants to use the parent\'s value instead.',
+      'Resync variant attributes to inherit from parent product.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -479,8 +475,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'relationships_link_product',
-    description:
-      'Link one product to another under a specific relationship.',
+    description: 'Link a related product to a relationship.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -596,6 +591,70 @@ const toolHandlers: Record<string, ToolHandler> = {
 
     return {
       content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
+    };
+  },
+
+  async products_get_full(args, client) {
+    const productId = args.product_id as string;
+    const productResult = await client.getProduct(productId);
+    const product = productResult.data?.[0];
+
+    if (!product) {
+      return {
+        content: [{ type: 'text', text: `Product not found: ${productId}` }],
+        isError: true,
+      };
+    }
+
+    const familyId = (product as Record<string, unknown>).product_family_id as string | undefined;
+    const [familyResult, variantsResult, categoriesResult, assetsResult] =
+      await Promise.allSettled([
+        familyId ? client.getFamily(familyId) : Promise.resolve(null),
+        client.getProductVariants(productId),
+        client.getProductCategories(productId),
+        client.getProductAssets(productId),
+      ]);
+
+    const errors: string[] = [];
+
+    const family =
+      familyResult.status === 'fulfilled'
+        ? (familyResult.value?.data?.[0] ?? null)
+        : (errors.push(`family: ${familyResult.reason}`), null);
+
+    const variants =
+      variantsResult.status === 'fulfilled'
+        ? (variantsResult.value?.data ?? [])
+        : (errors.push(`variants: ${variantsResult.reason}`), []);
+
+    const categories =
+      categoriesResult.status === 'fulfilled'
+        ? (categoriesResult.value?.data ?? [])
+        : (errors.push(`categories: ${categoriesResult.reason}`), []);
+
+    const assets =
+      assetsResult.status === 'fulfilled'
+        ? (assetsResult.value?.data ?? [])
+        : (errors.push(`assets: ${assetsResult.reason}`), []);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              product,
+              family,
+              variants,
+              categories,
+              assets,
+              ...(errors.length > 0 ? { _errors: errors } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   },
 
