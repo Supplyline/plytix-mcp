@@ -6,7 +6,7 @@ A **lightweight, stateless Model Context Protocol (MCP) server** that provides A
 
 ## Features
 
-- **29 MCP tools (stdio) and 19 MCP tools (remote worker)**
+- **47 MCP tools via stdio and 44 via the remote worker**
 - **Smart product lookup** with automatic identifier detection (SKU, MPN, GTIN, label)
 - **Family & inheritance tracking** with overwritten_attributes support
 - **Schema discovery** for attributes and search filters
@@ -98,6 +98,8 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
+The remote worker exposes 44 tools. It intentionally omits the three local-only identifier utilities: `identifier_detect`, `identifier_normalize`, and `match_score`.
+
 ### Local Development
 
 ```bash
@@ -115,6 +117,7 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 |------|-------------|
 | `products_lookup` | Smart lookup by any identifier (auto-detects ID, SKU, MPN, GTIN, label) |
 | `products_get` | Get single product by ID with full details and `overwritten_attributes` |
+| `products_get_full` | Get one product with related family, variants, categories, and assets |
 | `products_search` | Advanced search with filters, pagination, and sorting |
 | `products_find` | Simple multi-criteria search (SKU, MPN, MNO, GTIN, label, fuzzy) |
 | `products_create` | Create a new product |
@@ -129,39 +132,73 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 |------|-------------|
 | `families_list` | List or search product families |
 | `families_get` | Get single family with linked attributes |
+| `families_create` | Create a new product family |
+| `families_link_attribute` | Link one or more attributes to a family |
+| `families_unlink_attribute` | Unlink one or more attributes from a family |
+| `families_list_attributes` | List attributes directly linked to a family |
+| `families_list_all_attributes` | List direct and inherited family attributes |
 
-### Attribute Tools
+### Attribute & Filter Tools
 
 | Tool | Description |
 |------|-------------|
 | `attributes_list` | List all attributes (system + custom) with types and options |
 | `attributes_get` | Get full metadata for one attribute label |
 | `attributes_get_options` | Get allowed values for a selectable attribute |
-| `attributes_filters` | Get available search filters and operators |
+| `attributes_filters` | Deprecated alias for product filter discovery |
+| `products_filters` | Get product search filter metadata |
+| `assets_filters` | Get asset search filter metadata |
+| `relationships_filters` | Get relationship search filter metadata |
 
-### Related Data Tools
+### Asset Tools
 
 | Tool | Description |
 |------|-------------|
+| `assets_get` | Get one asset by ID |
+| `assets_search` | Search account assets |
+| `assets_update` | Update asset metadata (`filename`, `categories`) |
 | `assets_list` | List assets (images, videos, documents) linked to a product |
 | `assets_link` | Link an asset to a product |
 | `assets_unlink` | Unlink an asset from a product |
+
+### Category Tools
+
+| Tool | Description |
+|------|-------------|
+| `categories_search` | Search existing categories |
 | `categories_list` | List categories associated with a product |
 | `categories_link` | Link a category to a product |
 | `categories_unlink` | Unlink a category from a product |
+
+### Variant Tools
+
+| Tool | Description |
+|------|-------------|
+| `variants_create` | Create a variant under a parent product |
+| `variants_link` | Link an existing product as a variant |
+| `variants_unlink` | Unlink a variant from its parent without deleting it |
 | `variants_list` | List variants for a product |
 | `variants_resync` | Reset variant attributes to inherit parent values |
+
+### Relationship Tools
+
+| Tool | Description |
+|------|-------------|
+| `relationships_get` | Get a relationship definition by ID |
+| `relationships_search` | Search relationship definitions |
 | `relationships_link_product` | Link one related product row in a relationship |
 | `relationships_unlink_product` | Unlink one related product row in a relationship |
 | `relationships_set_quantity` | Update quantity for one related product row |
 
-### Identifier Utilities
+### Identifier Utilities (Stdio Only)
 
 | Tool | Description |
 |------|-------------|
 | `identifier_detect` | Detect identifier type from raw value |
 | `identifier_normalize` | Normalize identifier for matching |
 | `match_score` | Score identifier-product match confidence |
+
+The remote worker exposes every tool above except the three identifier utilities in the final section.
 
 ## Smart Lookup System
 
@@ -242,13 +279,13 @@ src/
     lookup.ts           # Smart lookup with staged search
   tools/
     products.ts         # Product tools (lookup, get, search, find, write ops)
-    families.ts         # Family tools (list, get)
-    attributes.ts       # Attribute metadata tools
+    families.ts         # Family tools (list, get, create, attribute membership)
+    attributes.ts       # Attribute metadata + filter discovery tools
     product-attributes.ts # Atomic product attribute write tools
-    assets.ts           # Asset list/link/unlink tools
-    categories.ts       # Category list/link/unlink tools
-    variants.ts         # Variant list/resync tools
-    relationships.ts    # Product relationship write tools
+    assets.ts           # Asset get/search/update + product asset link tools
+    categories.ts       # Category search + product category link tools
+    variants.ts         # Variant lifecycle tools
+    relationships.ts    # Relationship discovery + product relationship write tools
   supplyline/           # Supplyline-specific customizations
 wrangler.toml           # Cloudflare Workers configuration
 docs/

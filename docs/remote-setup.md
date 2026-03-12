@@ -9,6 +9,14 @@ The remote MCP server runs on Cloudflare Workers and provides:
 - **BYOK (Bring Your Own Key)** - Your Plytix API credentials are sent per-request
 - **Mobile access** - Works with Claude mobile app
 - **Team sharing** - Single deployment, multiple users
+- **44 remote tools** - All API-backed tools in this project except three local-only identifier utilities
+
+The remote worker intentionally does not expose these stdio-only utilities:
+- `identifier_detect`
+- `identifier_normalize`
+- `match_score`
+
+For remote clients, use `products_lookup` instead of those helpers.
 
 ## Getting Your Plytix API Key
 
@@ -207,24 +215,81 @@ The Plytix API has rate limits. The server handles backoff automatically, but re
 
 ## Available Tools
 
+### Product Tools
+
 | Tool | Description |
 |------|-------------|
 | `products_lookup` | Smart lookup by any identifier (auto-detects type) |
 | `products_get` | Get single product by ID |
+| `products_get_full` | Get one product with family, variants, categories, and assets |
 | `products_search` | Advanced search with filters, pagination, sorting |
 | `products_find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
-| `families_list` | List/search product families |
-| `families_get` | Get single family with linked attributes |
-| `attributes_list` | List all attributes (system + custom) |
-| `attributes_filters` | Get available search filters |
+| `products_create` | Create a new product |
+| `products_update` | Update product fields and attributes |
+| `products_assign_family` | Assign or unassign a family |
 | `products_set_attribute` | Set one product attribute atomically |
 | `products_clear_attribute` | Clear one product attribute atomically |
+
+### Family Tools
+
+| Tool | Description |
+|------|-------------|
+| `families_list` | List or search product families |
+| `families_get` | Get one family with linked attributes |
+| `families_create` | Create a new product family |
+| `families_link_attribute` | Link one or more attributes to a family |
+| `families_unlink_attribute` | Unlink one or more attributes from a family |
+| `families_list_attributes` | List attributes directly linked to a family |
+| `families_list_all_attributes` | List direct and inherited family attributes |
+
+### Attribute & Filter Tools
+
+| Tool | Description |
+|------|-------------|
+| `attributes_list` | List all attributes (system + custom) |
+| `attributes_get` | Get attribute metadata by label |
+| `attributes_get_options` | Get allowed values for a selectable attribute |
+| `attributes_filters` | Deprecated alias for product filter discovery |
+| `products_filters` | Get product search filter metadata |
+| `assets_filters` | Get asset search filter metadata |
+| `relationships_filters` | Get relationship search filter metadata |
+
+### Asset Tools
+
+| Tool | Description |
+|------|-------------|
+| `assets_get` | Get one asset by ID |
+| `assets_search` | Search account assets |
+| `assets_update` | Update asset metadata (`filename`, `categories`) |
 | `assets_list` | List assets linked to a product |
 | `assets_link` | Link asset to a product |
 | `assets_unlink` | Unlink asset from a product |
+
+### Category Tools
+
+| Tool | Description |
+|------|-------------|
+| `categories_search` | Search existing categories |
 | `categories_list` | List categories linked to a product |
+| `categories_link` | Link a category to a product |
+| `categories_unlink` | Unlink a category from a product |
+
+### Variant Tools
+
+| Tool | Description |
+|------|-------------|
+| `variants_create` | Create a variant beneath a parent product |
+| `variants_link` | Link an existing product as a variant |
+| `variants_unlink` | Unlink a variant without deleting the product |
 | `variants_list` | List variants for a product |
 | `variants_resync` | Reset variant attributes to inherit from parent |
+
+### Relationship Tools
+
+| Tool | Description |
+|------|-------------|
+| `relationships_get` | Get a relationship definition |
+| `relationships_search` | Search relationship definitions |
 | `relationships_link_product` | Link one related product row in a relationship |
 | `relationships_unlink_product` | Unlink one related product row in a relationship |
 | `relationships_set_quantity` | Update quantity for one related product row |
