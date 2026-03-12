@@ -694,7 +694,7 @@ export class PlytixClient {
       `/api/v2/products/${encodeURIComponent(parentProductId)}/variants`,
       {
         method: 'POST',
-        body: JSON.stringify({ variant: data }),
+        body: JSON.stringify(data),
       }
     );
   }

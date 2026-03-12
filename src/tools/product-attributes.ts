@@ -7,8 +7,9 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
-import type { PlytixAttributeDetail } from '../types.js';
 import { registerTool } from './register.js';
+import { stripAttributesPrefix } from '../utils/attribute-labels.js';
+import { validateAttributeValue } from '../utils/validate-attribute.js';
 
 export function registerProductAttributeTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
@@ -39,7 +40,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
           };
         }
 
-        const normalizedLabel = normalizeAttributeLabel(attribute_label);
+        const normalizedLabel = stripAttributesPrefix(attribute_label);
         if (!normalizedLabel) {
           return {
             content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
@@ -120,7 +121,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     },
     async ({ product_id, attribute_label }) => {
       try {
-        const normalizedLabel = normalizeAttributeLabel(attribute_label);
+        const normalizedLabel = stripAttributesPrefix(attribute_label);
         if (!normalizedLabel) {
           return {
             content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
@@ -172,41 +173,4 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
       }
     }
   );
-}
-
-function normalizeAttributeLabel(label: string): string {
-  const trimmed = label.trim();
-  return trimmed.startsWith('attributes.') ? trimmed.slice('attributes.'.length) : trimmed;
-}
-
-function validateAttributeValue(attribute: PlytixAttributeDetail, value: unknown): string | null {
-  const options = attribute.options ?? [];
-
-  if (options.length === 0) {
-    return null;
-  }
-
-  // For selectable attributes, enforce known option values to fail fast.
-  if (attribute.type_class === 'DropdownAttribute') {
-    if (typeof value !== 'string') {
-      return `Attribute "${attribute.label}" expects a single string option`;
-    }
-    if (!options.includes(value)) {
-      return `Invalid value for "${attribute.label}". Allowed options: ${options.join(', ')}`;
-    }
-    return null;
-  }
-
-  if (attribute.type_class === 'MultiSelectAttribute') {
-    if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
-      return `Attribute "${attribute.label}" expects an array of string options`;
-    }
-
-    const invalid = value.filter((v) => !options.includes(v));
-    if (invalid.length > 0) {
-      return `Invalid option(s) for "${attribute.label}": ${invalid.join(', ')}`;
-    }
-  }
-
-  return null;
 }

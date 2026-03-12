@@ -20,6 +20,7 @@ import type {
   PlytixCategory,
   PlytixFamily,
   PlytixFamilyAttribute,
+  PlytixAttributeDetail,
   PlytixFilterDefinition,
   PlytixRelationshipDefinition,
   RateLimitInfo,
@@ -43,6 +44,8 @@ export interface WorkerClientConfig {
 export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
+  private attributeCache?: Map<string, PlytixAttributeDetail>;
+  private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
 
   constructor(config: WorkerClientConfig) {
     if (!config.apiKey || !config.apiPassword) {
@@ -261,6 +264,56 @@ export class WorkerPlytixClient {
     });
   }
 
+  async createProduct(data: {
+    sku: string;
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+    categories?: Array<{ id: string }>;
+    assets?: Array<{ id: string }>;
+  }): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>('/api/v2/products', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async assignProductFamily(
+    productId: string,
+    familyId: string
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/family`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ product_family_id: familyId }),
+      }
+    );
+  }
+
+  async linkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ id: categoryId }),
+      }
+    );
+  }
+
+  async unlinkProductCategory(
+    productId: string,
+    categoryId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/categories/${encodeURIComponent(categoryId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
   async linkProductAsset(
     productId: string,
     assetId: string,
@@ -443,6 +496,120 @@ export class WorkerPlytixClient {
     }
   }
 
+  /**
+   * Paginate all attribute IDs from the v1 search endpoint.
+   */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
+    const attrIds: string[] = [];
+    let page = 1;
+
+    while (page <= MAX_PAGES) {
+      const result = await this.request<{ id: string }>(
+        '/api/v1/attributes/product/search',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            pagination: { page, page_size: pageSize },
+          }),
+        }
+      );
+
+      if (!result.data || result.data.length === 0) break;
+      attrIds.push(...result.data.map((a) => a.id));
+      if (result.data.length < pageSize) break;
+      page++;
+    }
+
+    return attrIds;
+  }
+
+  /**
+   * Get full attribute details by ID.
+   */
+  async getAttributeById(attrId: string): Promise<PlytixAttributeDetail | null> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attrId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  /**
+   * Build attribute cache indexed by label.
+   * Per-request scope — no TTL needed (stateless worker).
+   * Deduplicates concurrent callers via shared promise.
+   */
+  private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    if (this.attributeCache) return this.attributeCache;
+    if (this.attributeCachePromise) return this.attributeCachePromise;
+
+    this.attributeCachePromise = this.doBuildAttributeCache();
+    try {
+      return await this.attributeCachePromise;
+    } finally {
+      this.attributeCachePromise = undefined;
+    }
+  }
+
+  private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    const attrIds = await this.searchAttributeIds();
+
+    if (attrIds.length === 0) {
+      throw new PlytixError(
+        'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
+      );
+    }
+
+    // Fetch in batches to avoid overwhelming Plytix rate limits
+    const BATCH_SIZE = 10;
+    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
+    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
+      const batch = attrIds.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((id) => this.getAttributeById(id))
+      );
+      allResults.push(...batchResults);
+    }
+
+    const byLabel = new Map<string, PlytixAttributeDetail>();
+    let failures = 0;
+    for (const result of allResults) {
+      if (result.status === 'fulfilled' && result.value?.label) {
+        byLabel.set(result.value.label, result.value);
+      } else {
+        failures++;
+      }
+    }
+
+    // If >20% of fetches failed or returned empty, don't cache — surface the error
+    if (failures > attrIds.length * 0.2) {
+      throw new PlytixError(
+        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
+      );
+    }
+
+    this.attributeCache = byLabel;
+    return byLabel;
+  }
+
+  /**
+   * Get full attribute details by label (snake_case identifier).
+   */
+  async getAttributeByLabel(label: string): Promise<PlytixAttributeDetail | null> {
+    const cache = await this.buildAttributeCache();
+    return cache.get(label) ?? null;
+  }
+
+  /**
+   * Get options for a dropdown/multiselect attribute by label.
+   * Returns null if attribute not found, empty array if no options.
+   */
+  async getAttributeOptions(label: string): Promise<string[] | null> {
+    const attr = await this.getAttributeByLabel(label);
+    if (!attr) return null;
+    return attr.options ?? [];
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Assets (v1 API for account-level asset discovery and metadata)
   // ─────────────────────────────────────────────────────────────
@@ -517,7 +684,7 @@ export class WorkerPlytixClient {
       `/api/v2/products/${encodeURIComponent(parentProductId)}/variants`,
       {
         method: 'POST',
-        body: JSON.stringify({ variant: data }),
+        body: JSON.stringify(data),
       }
     );
   }

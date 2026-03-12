@@ -12,6 +12,8 @@
 
 import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
+import { stripAttributesPrefix } from './utils/attribute-labels.js';
+import { validateAttributeValue } from './utils/validate-attribute.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -92,11 +94,6 @@ function getCorsHeaders(request: Request): Record<string, string> {
   return headers;
 }
 
-function normalizeAttributeLabel(label: string): string {
-  const trimmed = label.trim();
-  return trimmed.startsWith('attributes.') ? trimmed.slice('attributes.'.length) : trimmed;
-}
-
 // ─────────────────────────────────────────────────────────────
 // Tool Definitions
 // ─────────────────────────────────────────────────────────────
@@ -141,6 +138,20 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'products_get_full',
+    description: 'Get one product with related data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: {
+          type: 'string',
+          description: 'The product ID to fetch',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
     name: 'products_search',
     description: 'Search products with filters.',
     inputSchema: {
@@ -149,7 +160,7 @@ const TOOLS: ToolDefinition[] = [
         attributes: {
           type: 'array',
           items: { type: 'string' },
-          description: 'List of attributes to return (max 50)',
+          description: 'Attributes to return (max 50). Prefix custom attrs with "attributes." e.g. "attributes.head_material".',
         },
         filters: {
           type: 'array',
@@ -288,6 +299,34 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'attributes_get',
+    description: 'Get one attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
+    name: 'attributes_get_options',
+    description: 'List allowed values for an attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
     name: 'attributes_filters',
     description: 'Deprecated alias for product filters.',
     inputSchema: {
@@ -345,6 +384,65 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'products_create',
+    description: 'Create a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sku: { type: 'string', description: 'Product SKU (required, must be unique)' },
+        label: { type: 'string', description: 'Product label/name' },
+        status: { type: 'string', description: 'Product status' },
+        attributes: {
+          type: 'object',
+          description: 'Custom attributes as key-value pairs (use attribute labels as keys)',
+        },
+        category_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Category IDs to link to this product',
+        },
+        asset_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Asset IDs to link to this product',
+        },
+      },
+      required: ['sku'],
+    },
+  },
+  {
+    name: 'products_update',
+    description: 'Update a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        label: { type: 'string', description: 'New product label/name' },
+        status: { type: 'string', description: 'New product status' },
+        attributes: {
+          type: 'object',
+          description: 'Attributes to update (use attribute labels as keys, null to clear)',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_assign_family',
+    description: 'Assign or unassign a family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        family_id: {
+          type: 'string',
+          description: 'The family ID to assign (empty string to unassign)',
+        },
+      },
+      required: ['product_id', 'family_id'],
+    },
+  },
+  {
     name: 'assets_get',
     description: 'Get one asset by ID.',
     inputSchema: {
@@ -396,7 +494,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'assets_list',
-    description: 'List assets linked to a product.',
+    description: 'List assets linked to a product (Plytix v2)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -459,6 +557,30 @@ const TOOLS: ToolDefinition[] = [
         product_id: { type: 'string', description: 'The product ID' },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'categories_link',
+    description: 'Link a category to a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to link' },
+      },
+      required: ['product_id', 'category_id'],
+    },
+  },
+  {
+    name: 'categories_unlink',
+    description: 'Unlink a category from a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to unlink' },
+      },
+      required: ['product_id', 'category_id'],
     },
   },
   {
@@ -681,6 +803,71 @@ const toolHandlers: Record<string, ToolHandler> = {
 
     return {
       content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
+    };
+  },
+
+  async products_get_full(args, client) {
+    const productId = args.product_id as string;
+    const productResult = await client.getProduct(productId);
+    const product = productResult.data?.[0];
+
+    if (!product) {
+      return {
+        content: [{ type: 'text', text: `Product not found: ${productId}` }],
+        isError: true,
+      };
+    }
+
+    const familyId = (product as Record<string, unknown>).product_family_id as string | undefined;
+    const [familyResult, variantsResult, categoriesResult, assetsResult] =
+      await Promise.allSettled([
+        familyId ? client.getFamily(familyId) : Promise.resolve(null),
+        client.getProductVariants(productId),
+        client.getProductCategories(productId),
+        client.getProductAssets(productId),
+      ]);
+
+    const errors: string[] = [];
+    const errMsg = (e: unknown) => e instanceof Error ? e.message : String(e);
+
+    const family =
+      familyResult.status === 'fulfilled'
+        ? (familyResult.value?.data?.[0] ?? null)
+        : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
+
+    const variants =
+      variantsResult.status === 'fulfilled'
+        ? (variantsResult.value?.data ?? [])
+        : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
+
+    const categories =
+      categoriesResult.status === 'fulfilled'
+        ? (categoriesResult.value?.data ?? [])
+        : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
+
+    const assets =
+      assetsResult.status === 'fulfilled'
+        ? (assetsResult.value?.data ?? [])
+        : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              product,
+              family,
+              variants,
+              categories,
+              assets,
+              ...(errors.length > 0 ? { _errors: errors } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   },
 
@@ -1027,9 +1214,72 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async attributes_get(args, client) {
+    const label = args.label as string;
+    const attr = await client.getAttributeByLabel(label);
+
+    if (!attr) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              id: attr.id,
+              label: attr.label,
+              name: attr.name,
+              type_class: attr.type_class,
+              options: attr.options ?? [],
+              options_count: attr.options?.length ?? 0,
+              groups: attr.groups ?? [],
+              description: attr.description,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async attributes_get_options(args, client) {
+    const label = args.label as string;
+    const options = await client.getAttributeOptions(label);
+
+    if (options === null) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              label,
+              options,
+              count: options.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async products_set_attribute(args, client) {
     const productId = args.product_id as string;
-    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
     const value = args.value;
 
     if (!attributeLabel) {
@@ -1046,10 +1296,33 @@ const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
+    const validationError = validateAttributeValue(attribute, value);
+    if (validationError) {
+      return {
+        content: [{ type: 'text', text: validationError }],
+        isError: true,
+      };
+    }
+
     const result = await client.updateProduct(productId, {
       attributes: { [attributeLabel]: value },
     });
     const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute write may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
 
     return {
       content: [
@@ -1061,7 +1334,7 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'set',
-              modified: updated?.modified,
+              modified: updated.modified,
             },
             null,
             2
@@ -1073,7 +1346,7 @@ const toolHandlers: Record<string, ToolHandler> = {
 
   async products_clear_attribute(args, client) {
     const productId = args.product_id as string;
-    const attributeLabel = normalizeAttributeLabel(args.attribute_label as string);
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
 
     if (!attributeLabel) {
       return {
@@ -1082,10 +1355,25 @@ const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
     const result = await client.updateProduct(productId, {
       attributes: { [attributeLabel]: null },
     });
     const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute clear may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
 
     return {
       content: [
@@ -1097,7 +1385,130 @@ const toolHandlers: Record<string, ToolHandler> = {
               product_id: productId,
               attribute_label: attributeLabel,
               action: 'cleared',
-              modified: updated?.modified,
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_create(args, client) {
+    const sku = args.sku as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+    const categoryIds = args.category_ids as string[] | undefined;
+    const assetIds = args.asset_ids as string[] | undefined;
+
+    const data: Parameters<typeof client.createProduct>[0] = { sku };
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+    if (categoryIds?.length) data.categories = categoryIds.map((id) => ({ id }));
+    if (assetIds?.length) data.assets = assetIds.map((id) => ({ id }));
+
+    const result = await client.createProduct(data);
+    const created = result.data?.[0];
+
+    if (!created?.id) {
+      return {
+        content: [{ type: 'text', text: 'Product creation failed: no ID returned from API' }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: created.id,
+              created: created.created,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_update(args, client) {
+    const productId = args.product_id as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+
+    const data: Parameters<typeof client.updateProduct>[1] = {};
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+
+    if (Object.keys(data).length === 0) {
+      return {
+        content: [{ type: 'text', text: 'No fields provided to update' }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, data);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Product update failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_assign_family(args, client) {
+    const productId = args.product_id as string;
+    const familyId = args.family_id as string;
+
+    const result = await client.assignProductFamily(productId, familyId);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Family assignment failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              family_id: familyId || null,
+              action: familyId ? 'assigned' : 'unassigned',
+              modified: updated.modified,
             },
             null,
             2
@@ -1351,6 +1762,38 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async categories_link(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    const result = await client.linkProductCategory(productId, categoryId);
+    const linked = result.data?.[0];
+
+    if (!linked?.id) {
+      return {
+        content: [{ type: 'text', text: `Category link failed: no response for product ${productId}, category ${categoryId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category: { id: linked.id, name: linked.name, path: linked.path },
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async variants_link(args, client) {
     const parentProductId = args.parent_product_id as string;
     const variantProductId = args.variant_product_id as string;
@@ -1392,6 +1835,31 @@ const toolHandlers: Record<string, ToolHandler> = {
               action: 'unlinked',
               parent_product_id: parentProductId,
               variant_product_id: variantProductId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_unlink(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    await client.unlinkProductCategory(productId, categoryId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category_id: categoryId,
+              action: 'unlinked',
             },
             null,
             2

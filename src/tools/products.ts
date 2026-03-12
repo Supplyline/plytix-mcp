@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
+import type { PlytixProduct } from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
 import type { IdentifierType } from '../lookup/identifier.js';
@@ -123,6 +124,97 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
 
         return {
           content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.get_full - Product + family + variants + categories + assets
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ product_id: string }>(
+    server,
+    'products_get_full',
+    {
+      title: 'Get Product (Full)',
+      description: 'Get one product with related data.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID to fetch'),
+      },
+    },
+    async ({ product_id }) => {
+      try {
+        const productResult = await client.getProduct(product_id);
+        const product = productResult.data?.[0] as PlytixProduct | undefined;
+
+        if (!product) {
+          return {
+            content: [{ type: 'text', text: `Product not found: ${product_id}` }],
+            isError: true,
+          };
+        }
+
+        const familyId = product.product_family_id;
+        const [familyResult, variantsResult, categoriesResult, assetsResult] =
+          await Promise.allSettled([
+            familyId ? client.getFamily(familyId) : Promise.resolve(null),
+            client.getProductVariants(product_id),
+            client.getProductCategories(product_id),
+            client.getProductAssets(product_id),
+          ]);
+
+        const errors: string[] = [];
+        const errMsg = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+        const family =
+          familyResult.status === 'fulfilled'
+            ? (familyResult.value?.data?.[0] ?? null)
+            : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
+
+        const variants =
+          variantsResult.status === 'fulfilled'
+            ? (variantsResult.value?.data ?? [])
+            : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
+
+        const categories =
+          categoriesResult.status === 'fulfilled'
+            ? (categoriesResult.value?.data ?? [])
+            : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
+
+        const assets =
+          assetsResult.status === 'fulfilled'
+            ? (assetsResult.value?.data ?? [])
+            : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  product,
+                  family,
+                  variants,
+                  categories,
+                  assets,
+                  ...(errors.length > 0 ? { _errors: errors } : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
         };
       } catch (error) {
         return {
