@@ -26,9 +26,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_lookup',
     {
       title: 'Smart Product Lookup',
-      description:
-        'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-        'Returns best match with confidence scoring.',
+      description: 'Find the best product match for an identifier.',
       inputSchema: {
         identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
         type: z
@@ -108,8 +106,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_get',
     {
       title: 'Get Product',
-      description:
-        'Get a single product by ID with full attributes and inheritance metadata.',
+      description: 'Get one product by ID.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
       },
@@ -143,7 +140,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // products.get_full - Compound read: product + family + variants + categories + assets
+  // products.get_full - Product + family + variants + categories + assets
   // ─────────────────────────────────────────────────────────────
 
   registerTool<{ product_id: string }>(
@@ -151,15 +148,13 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_get_full',
     {
       title: 'Get Product (Full)',
-      description:
-        'Get product with all related data (family, variants, categories, assets) in one call.',
+      description: 'Get one product with related data.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
       },
     },
     async ({ product_id }) => {
       try {
-        // Step 1: Fetch the product (needed to extract family ID)
         const productResult = await client.getProduct(product_id);
         const product = productResult.data?.[0] as PlytixProduct | undefined;
 
@@ -170,7 +165,6 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           };
         }
 
-        // Step 2: Parallel fetch of related data
         const familyId = product.product_family_id;
         const [familyResult, variantsResult, categoriesResult, assetsResult] =
           await Promise.allSettled([
@@ -181,26 +175,27 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           ]);
 
         const errors: string[] = [];
+        const errMsg = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
         const family =
           familyResult.status === 'fulfilled'
             ? (familyResult.value?.data?.[0] ?? null)
-            : (errors.push(`family: ${familyResult.reason}`), null);
+            : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
 
         const variants =
           variantsResult.status === 'fulfilled'
             ? (variantsResult.value?.data ?? [])
-            : (errors.push(`variants: ${variantsResult.reason}`), []);
+            : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
 
         const categories =
           categoriesResult.status === 'fulfilled'
             ? (categoriesResult.value?.data ?? [])
-            : (errors.push(`categories: ${categoriesResult.reason}`), []);
+            : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
 
         const assets =
           assetsResult.status === 'fulfilled'
             ? (assetsResult.value?.data ?? [])
-            : (errors.push(`assets: ${assetsResult.reason}`), []);
+            : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
 
         return {
           content: [
@@ -249,12 +244,12 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_search',
     {
       title: 'Search Products',
-      description: 'Search products with filters, pagination, and sorting.',
+      description: 'Search products with filters.',
       inputSchema: {
         attributes: z
           .array(z.string())
           .optional()
-          .describe('Attributes to return (max 50). Prefix custom attrs with "attributes." e.g. "attributes.head_material".'),
+          .describe('List of attributes to return (max 50). Custom attrs need "attributes." prefix.'),
         filters: z
           .array(z.any())
           .optional()
@@ -322,8 +317,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_find',
     {
       title: 'Find Products',
-      description:
-        'Find products by SKU, MPN, MNO, GTIN, label, or fuzzy text search.',
+      description: 'Find products by common identifiers.',
       inputSchema: {
         sku: z.string().optional().describe('Exact SKU match'),
         mpn: z.string().optional().describe('Manufacturer part number'),
@@ -405,7 +399,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_create',
     {
       title: 'Create Product',
-      description: 'Create a new product (SKU required).',
+      description: 'Create a product.',
       inputSchema: {
         sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
         label: z.string().optional().describe('Product label/name'),
@@ -486,7 +480,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_update',
     {
       title: 'Update Product',
-      description: 'Partial update — only specified fields are changed.',
+      description: 'Update a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         label: z.string().optional().describe('New product label/name'),
@@ -562,8 +556,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_assign_family',
     {
       title: 'Assign Product Family',
-      description:
-        'Assign or unassign a product family. Pass empty string to unassign.',
+      description: 'Assign or unassign a family.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         family_id: z

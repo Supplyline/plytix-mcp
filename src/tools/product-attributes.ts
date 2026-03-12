@@ -21,8 +21,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     'products_set_attribute',
     {
       title: 'Set Product Attribute',
-      description:
-        'Set a single product attribute value. Validates against attribute schema.',
+      description: 'Set one product attribute.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         attribute_label: z
@@ -111,7 +110,7 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
     'products_clear_attribute',
     {
       title: 'Clear Product Attribute',
-      description: 'Clear a single product attribute value (set to null).',
+      description: 'Clear one product attribute.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         attribute_label: z

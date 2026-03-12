@@ -11,6 +11,106 @@ import { registerTool } from './register.js';
 
 export function registerRelationshipTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
+  // relationships_get - Get one relationship definition
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ relationship_id: string }>(
+    server,
+    'relationships_get',
+    {
+      title: 'Get Relationship',
+      description: 'Get one relationship definition.',
+      inputSchema: {
+        relationship_id: z.string().min(1).describe('The relationship definition ID'),
+      },
+    },
+    async ({ relationship_id }) => {
+      try {
+        const result = await client.getRelationship(relationship_id);
+        const relationship = result.data?.[0];
+
+        if (!relationship) {
+          return {
+            content: [{ type: 'text', text: `Relationship not found: ${relationship_id}` }],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(relationship, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching relationship: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // relationships_search - Search/list relationship definitions
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ query?: string; pagination?: { page?: number; page_size?: number } }>(
+    server,
+    'relationships_search',
+    {
+      title: 'Search Relationships',
+      description: 'Search relationship definitions.',
+      inputSchema: {
+        query: z.string().optional().describe('Search query to filter relationships by label'),
+        pagination: z
+          .object({
+            page: z.number().int().positive().optional(),
+            page_size: z.number().int().positive().max(100).optional(),
+          })
+          .optional()
+          .describe('Pagination options'),
+      },
+    },
+    async ({ query, pagination }) => {
+      try {
+        const result = await client.searchRelationships({
+          ...(pagination !== undefined ? { pagination } : {}),
+          ...(query ? { filters: [[{ field: 'label', operator: 'like', value: query }]] } : {}),
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  relationships: result.data,
+                  pagination: result.pagination,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error searching relationships: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // relationships_link_product - Link one related product
   // ─────────────────────────────────────────────────────────────
 
@@ -24,7 +124,7 @@ export function registerRelationshipTools(server: McpServer, client: PlytixClien
     'relationships_link_product',
     {
       title: 'Link Related Product',
-      description: 'Link a related product to a relationship.',
+      description: 'Link a related product.',
       inputSchema: {
         product_id: z.string().min(1).describe('Primary product ID'),
         relationship_id: z.string().min(1).describe('Relationship definition ID'),
@@ -87,8 +187,7 @@ export function registerRelationshipTools(server: McpServer, client: PlytixClien
     'relationships_unlink_product',
     {
       title: 'Unlink Related Product',
-      description:
-        'Unlink one related product from a relationship on the primary product.',
+      description: 'Unlink a related product.',
       inputSchema: {
         product_id: z.string().min(1).describe('Primary product ID'),
         relationship_id: z.string().min(1).describe('Relationship definition ID'),

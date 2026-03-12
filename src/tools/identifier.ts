@@ -36,8 +36,7 @@ export function registerIdentifierTools(server: McpServer) {
     'identifier_detect',
     {
       title: 'Detect Identifier Type',
-      description:
-        'Detect identifier type (ID, SKU, MPN, GTIN, label) with confidence score.',
+      description: 'Detect identifier type.',
       inputSchema: {
         value: z.string().describe('The identifier value to analyze'),
       },
@@ -74,8 +73,7 @@ export function registerIdentifierTools(server: McpServer) {
     'identifier_normalize',
     {
       title: 'Normalize Identifier',
-      description:
-        'Normalize an identifier for comparison (strip special chars, uppercase).',
+      description: 'Normalize an identifier.',
       inputSchema: {
         value: z.string().describe('The identifier value to normalize'),
       },
@@ -110,8 +108,7 @@ export function registerIdentifierTools(server: McpServer) {
     'match_score',
     {
       title: 'Score Match',
-      description:
-        'Score match confidence between an identifier and product data fields.',
+      description: 'Score an identifier against product data.',
       inputSchema: {
         identifier: z.string().describe('The identifier to match'),
         product_data: z
