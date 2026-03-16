@@ -872,6 +872,20 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
 
   async products_search(args, client) {
+    // Normalize filter shorthand: LLMs may pass ["field","op","value"] tuples
+    // instead of the required {field, operator, value} objects.
+    if (Array.isArray(args.filters)) {
+      args.filters = (args.filters as unknown[][]).map((group) => {
+        if (!Array.isArray(group)) return group;
+        return group.map((item) => {
+          if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string') {
+            return { field: item[0], operator: item[1], value: item[2] };
+          }
+          return item;
+        });
+      });
+    }
+
     const result = await client.searchProducts(args as Record<string, unknown>);
 
     return {

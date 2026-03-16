@@ -33,6 +33,10 @@ const DEFAULT_CONFIG = {
   timeoutMs: 15000,
 };
 
+// Module-level JWT cache — survives across requests within the same CF Worker isolate.
+// Keyed by API key so multiple credentials don't collide.
+const tokenCache = new Map<string, PlytixAuthToken>();
+
 export interface WorkerClientConfig {
   apiKey: string;
   apiPassword: string;
@@ -67,8 +71,16 @@ export class WorkerPlytixClient {
 
   private async getToken(): Promise<string> {
     const now = Date.now();
+    const cacheKey = this.config.apiKey;
 
-    // Refresh 60s before expiration for safety
+    // Check module-level cache first (survives across requests in same isolate)
+    const cached = tokenCache.get(cacheKey);
+    if (cached && now < cached.exp - 60_000) {
+      this.token = cached;
+      return cached.value;
+    }
+
+    // Fall back to instance-level cache
     if (this.token && now < this.token.exp - 60_000) {
       return this.token.value;
     }
@@ -111,6 +123,9 @@ export class WorkerPlytixClient {
         value: tokenData.access_token,
         exp: now + expiresIn,
       };
+
+      // Persist to module-level cache for other instances with the same credentials
+      tokenCache.set(cacheKey, this.token);
 
       return this.token.value;
     } catch (error) {
@@ -187,8 +202,9 @@ export class WorkerPlytixClient {
         return this.request(endpoint, options, retries - 1);
       }
 
-      // Token expired - clear and retry
+      // Token expired - clear both caches and retry
       if (response.status === 401 && retries > 0) {
+        tokenCache.delete(this.config.apiKey);
         this.token = undefined;
         return this.request(endpoint, options, retries - 1);
       }
