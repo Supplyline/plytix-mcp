@@ -22,6 +22,7 @@ import { validateAttributeValue } from './utils/validate-attribute.js';
 interface Env {
   PLYTIX_API_BASE?: string;
   PLYTIX_AUTH_URL?: string;
+  OAUTH_KV?: KVNamespace;
 }
 
 interface JsonRpcRequest {
@@ -116,6 +117,95 @@ function getCorsHeaders(request: Request): Record<string, string> {
   // This will cause browsers to block cross-origin requests from unauthorized sites
 
   return headers;
+}
+
+// ─────────────────────────────────────────────────────────────
+// OAuth Helpers
+// ─────────────────────────────────────────────────────────────
+
+function generateToken(bytes = 32): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function computeS256(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderAuthorizePage(params: {
+  clientId: string;
+  redirectUri: string;
+  state: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  scope: string;
+  error?: string;
+}): string {
+  const errorHtml = params.error
+    ? `<div class="error">${escapeHtml(params.error)}</div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize - Plytix MCP</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;padding:20px;display:flex;justify-content:center;align-items:center;min-height:100vh}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.1);padding:40px;max-width:420px;width:100%}
+    h1{font-size:24px;color:#1a1a1a;margin-bottom:8px}
+    .subtitle{color:#666;font-size:14px;line-height:1.5;margin-bottom:24px}
+    .info{background:#f0f4ff;border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:#4f46e5;line-height:1.5}
+    .error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:#dc2626;line-height:1.5}
+    label{display:block;font-size:14px;font-weight:500;color:#333;margin-bottom:6px}
+    input[type="text"],input[type="password"]{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:16px}
+    input:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+    button{width:100%;padding:12px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:500;cursor:pointer}
+    button:hover{background:#4338ca}
+    .help{margin-top:16px;font-size:12px;color:#999;text-align:center}
+    .help a{color:#4f46e5;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Plytix MCP</h1>
+    <p class="subtitle">An application is requesting access to your Plytix PIM data.</p>
+    ${errorHtml}
+    <div class="info">Enter your Plytix API credentials. They are stored securely and used only to access the Plytix API on your behalf.</div>
+    <form method="POST" action="/authorize">
+      <input type="hidden" name="client_id" value="${escapeHtml(params.clientId)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(params.redirectUri)}">
+      <input type="hidden" name="state" value="${escapeHtml(params.state)}">
+      <input type="hidden" name="code_challenge" value="${escapeHtml(params.codeChallenge)}">
+      <input type="hidden" name="code_challenge_method" value="${escapeHtml(params.codeChallengeMethod)}">
+      <input type="hidden" name="scope" value="${escapeHtml(params.scope)}">
+      <label for="api_key">API Key</label>
+      <input type="text" id="api_key" name="api_key" required placeholder="Your Plytix API key" autocomplete="username">
+      <label for="api_password">API Password</label>
+      <input type="password" id="api_password" name="api_password" required placeholder="Your Plytix API password" autocomplete="current-password">
+      <button type="submit">Authorize</button>
+    </form>
+    <p class="help">Find your API credentials in <a href="https://pim.plytix.com/settings/api" target="_blank" rel="noopener">Plytix Settings</a></p>
+  </div>
+</body>
+</html>`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2273,6 +2363,288 @@ export default {
       });
     }
 
+    // ── OAuth Discovery ──────────────────────────────────────────
+
+    // Protected Resource Metadata (RFC 9728)
+    if (url.pathname === '/.well-known/oauth-protected-resource') {
+      return new Response(
+        JSON.stringify({
+          resource: url.origin,
+          authorization_servers: [url.origin],
+          bearer_methods_supported: ['header'],
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
+    // Authorization Server Metadata (RFC 8414)
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+      return new Response(
+        JSON.stringify({
+          issuer: url.origin,
+          authorization_endpoint: `${url.origin}/authorize`,
+          token_endpoint: `${url.origin}/token`,
+          registration_endpoint: `${url.origin}/register`,
+          response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+          scopes_supported: ['plytix'],
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
+    // ── Dynamic Client Registration (RFC 7591) ──────────────────
+
+    if (url.pathname === '/register' && request.method === 'POST') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      try {
+        const regBody = (await request.json()) as Record<string, unknown>;
+        const clientId = generateToken(16);
+        const authMethod = (regBody.token_endpoint_auth_method as string) || 'none';
+        const clientSecret = authMethod === 'none' ? undefined : generateToken(32);
+
+        const registration = {
+          client_id: clientId,
+          ...(clientSecret ? { client_secret: clientSecret } : {}),
+          redirect_uris: regBody.redirect_uris || [],
+          client_name: regBody.client_name || '',
+          token_endpoint_auth_method: authMethod,
+          grant_types: ['authorization_code'],
+          response_types: ['code'],
+        };
+
+        await env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify(registration));
+
+        return new Response(JSON.stringify(registration), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      } catch {
+        return new Response(
+          JSON.stringify({ error: 'invalid_client_metadata' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+    }
+
+    // ── Authorization Endpoint ───────────────────────────────────
+
+    if (url.pathname === '/authorize' && request.method === 'GET') {
+      const clientId = url.searchParams.get('client_id') || '';
+      const redirectUri = url.searchParams.get('redirect_uri') || '';
+      const state = url.searchParams.get('state') || '';
+      const codeChallenge = url.searchParams.get('code_challenge') || '';
+      const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
+      const scope = url.searchParams.get('scope') || '';
+      const responseType = url.searchParams.get('response_type') || '';
+
+      if (responseType !== 'code') {
+        return new Response(
+          JSON.stringify({ error: 'unsupported_response_type' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (!clientId || !redirectUri || !codeChallenge) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'Missing required parameters: client_id, redirect_uri, code_challenge' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(
+        renderAuthorizePage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope }),
+        { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      );
+    }
+
+    if (url.pathname === '/authorize' && request.method === 'POST') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const formData = await request.formData();
+      const clientId = (formData.get('client_id') as string) || '';
+      const redirectUri = (formData.get('redirect_uri') as string) || '';
+      const state = (formData.get('state') as string) || '';
+      const codeChallenge = (formData.get('code_challenge') as string) || '';
+      const codeChallengeMethod = (formData.get('code_challenge_method') as string) || '';
+      const scope = (formData.get('scope') as string) || '';
+      const apiKey = (formData.get('api_key') as string) || '';
+      const apiPassword = (formData.get('api_password') as string) || '';
+
+      if (!apiKey || !apiPassword) {
+        return new Response(
+          renderAuthorizePage({
+            clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+            error: 'Please enter both API key and password.',
+          }),
+          { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+        );
+      }
+
+      // Validate credentials against Plytix
+      try {
+        const authUrl = env.PLYTIX_AUTH_URL || 'https://auth.plytix.com/auth/api/get-token';
+        const authResponse = await fetch(authUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: apiKey, api_password: apiPassword }),
+        });
+
+        if (!authResponse.ok) {
+          return new Response(
+            renderAuthorizePage({
+              clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+              error: 'Invalid Plytix credentials. Please check your API key and password.',
+            }),
+            { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+          );
+        }
+      } catch {
+        return new Response(
+          renderAuthorizePage({
+            clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+            error: 'Could not verify credentials. Please try again.',
+          }),
+          { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+        );
+      }
+
+      // Generate auth code and store with credentials
+      const code = generateToken(32);
+      await env.OAUTH_KV.put(
+        `code:${code}`,
+        JSON.stringify({
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          code_challenge: codeChallenge,
+          code_challenge_method: codeChallengeMethod,
+          api_key: apiKey,
+          api_password: apiPassword,
+        }),
+        { expirationTtl: 600 } // 10 minute TTL for auth codes
+      );
+
+      // Redirect back to client with auth code
+      const redirect = new URL(redirectUri);
+      redirect.searchParams.set('code', code);
+      if (state) redirect.searchParams.set('state', state);
+
+      return Response.redirect(redirect.toString(), 302);
+    }
+
+    // ── Token Endpoint ───────────────────────────────────────────
+
+    if (url.pathname === '/token' && request.method === 'POST') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Parse body (supports both form-encoded and JSON)
+      let tokenParams: Record<string, string>;
+      const contentType = request.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        tokenParams = (await request.json()) as Record<string, string>;
+      } else {
+        const formData = await request.formData();
+        tokenParams = {
+          grant_type: (formData.get('grant_type') as string) || '',
+          code: (formData.get('code') as string) || '',
+          code_verifier: (formData.get('code_verifier') as string) || '',
+          client_id: (formData.get('client_id') as string) || '',
+          redirect_uri: (formData.get('redirect_uri') as string) || '',
+        };
+      }
+
+      if (tokenParams.grant_type !== 'authorization_code') {
+        return new Response(
+          JSON.stringify({ error: 'unsupported_grant_type' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      const { code, code_verifier, client_id: tokenClientId, redirect_uri: tokenRedirectUri } = tokenParams;
+
+      if (!code || !code_verifier) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'Missing code or code_verifier' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Look up auth code
+      const codeData = (await env.OAUTH_KV.get(`code:${code}`, 'json')) as {
+        client_id: string;
+        redirect_uri: string;
+        code_challenge: string;
+        code_challenge_method: string;
+        api_key: string;
+        api_password: string;
+      } | null;
+
+      if (!codeData) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Delete the code immediately (one-time use)
+      await env.OAUTH_KV.delete(`code:${code}`);
+
+      // Validate client_id and redirect_uri match
+      if (codeData.client_id !== tokenClientId || codeData.redirect_uri !== tokenRedirectUri) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Client ID or redirect URI mismatch' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Verify PKCE (S256)
+      const expectedChallenge = await computeS256(code_verifier);
+      if (expectedChallenge !== codeData.code_challenge) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Generate access token and store with credentials (no expiration)
+      const accessToken = generateToken(32);
+      await env.OAUTH_KV.put(
+        `token:${accessToken}`,
+        JSON.stringify({
+          api_key: codeData.api_key,
+          api_password: codeData.api_password,
+          client_id: codeData.client_id,
+          created_at: new Date().toISOString(),
+        })
+      );
+
+      return new Response(
+        JSON.stringify({
+          access_token: accessToken,
+          token_type: 'bearer',
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
     // Server info
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(
@@ -2286,6 +2658,16 @@ export default {
           },
           authentication: {
             methods: [
+              {
+                type: 'oauth',
+                endpoints: {
+                  metadata: '/.well-known/oauth-authorization-server',
+                  authorize: '/authorize',
+                  token: '/token',
+                  register: '/register',
+                },
+                note: 'For Claude web and other OAuth-capable MCP clients',
+              },
               {
                 type: 'headers',
                 required: ['X-Plytix-API-Key', 'X-Plytix-API-Password'],
@@ -2357,21 +2739,34 @@ export default {
       );
 
       // Extract API credentials from headers
-      // Supports two formats:
+      // Supports three formats:
       // 1. Custom headers: X-Plytix-API-Key and X-Plytix-API-Password
-      // 2. Bearer token: Authorization: Bearer <api_key>:<api_password>
+      // 2. Bearer token (BYOK): Authorization: Bearer <api_key>:<api_password>
+      // 3. Bearer token (OAuth): Authorization: Bearer <oauth_access_token>
       let apiKey = request.headers.get('X-Plytix-API-Key');
       let apiPassword = request.headers.get('X-Plytix-API-Password');
 
-      // Fallback to Bearer token for clients that only support an Authorization header
+      // Fallback to the Authorization header for clients that can't send custom headers.
+      // Bearer <key>:<password> = BYOK; Bearer <opaque> = OAuth access token (resolved via KV).
       if (!apiKey || !apiPassword) {
         const authHeader = request.headers.get('Authorization');
         if (authHeader?.startsWith('Bearer ')) {
-          const token = authHeader.slice(7); // Remove 'Bearer ' prefix
+          const token = authHeader.slice(7);
           const colonIndex = token.indexOf(':');
           if (colonIndex > 0) {
+            // BYOK format: key:password
             apiKey = token.slice(0, colonIndex);
             apiPassword = token.slice(colonIndex + 1);
+          } else if (env.OAUTH_KV) {
+            // OAuth token — look up credentials in KV
+            const tokenData = (await env.OAUTH_KV.get(`token:${token}`, 'json')) as {
+              api_key: string;
+              api_password: string;
+            } | null;
+            if (tokenData) {
+              apiKey = tokenData.api_key;
+              apiPassword = tokenData.api_password;
+            }
           }
         }
       }
@@ -2385,12 +2780,16 @@ export default {
             error: {
               code: -32600,
               message:
-                'Missing Plytix API credentials. Provide either X-Plytix-API-Key and X-Plytix-API-Password headers, or Authorization: Bearer <api_key>:<api_password>',
+                'Authentication required. Use OAuth, provide X-Plytix-API-Key/X-Plytix-API-Password headers, or Authorization: Bearer <api_key>:<api_password>',
             },
           }),
           {
             status: 401,
-            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+              ...corsHeaders,
+            },
           }
         );
       }
