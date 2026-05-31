@@ -40,6 +40,18 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
           };
         }
 
+        if (value === '') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Value cannot be an empty string. Use products_clear_attribute to remove a value.',
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const normalizedLabel = stripAttributesPrefix(attribute_label);
         if (!normalizedLabel) {
           return {
@@ -68,6 +80,18 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
           attributes: { [normalizedLabel]: value },
         });
         const updated = result.data?.[0];
+
+        if (!updated?.id) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Attribute update for product ${product_id} returned no confirmed product. The write may not have been applied.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
         return {
           content: [
@@ -141,6 +165,18 @@ export function registerProductAttributeTools(server: McpServer, client: PlytixC
           attributes: { [normalizedLabel]: null },
         });
         const updated = result.data?.[0];
+
+        if (!updated?.id) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Attribute clear for product ${product_id} returned no confirmed product. The change may not have been applied.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
         return {
           content: [

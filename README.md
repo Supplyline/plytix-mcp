@@ -2,7 +2,7 @@
 
 A **lightweight, stateless Model Context Protocol (MCP) server** that provides AI assistants with live access to Plytix PIM (Product Information Management) data. This server enables AI tools like Claude Desktop, Claude mobile app, and other MCP clients to search, look up, and retrieve product information directly from the Plytix API.
 
-> **Note:** This is a stateless live API tool for read and write operations. For sync, caching, or ETL workflows, see [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
+> **Note:** This is a stateless, live API tool for read and write operations. For sync, caching, or ETL workflows, pair it with a separate persistence layer of your choosing.
 
 ## Features
 
@@ -286,7 +286,7 @@ src/
     categories.ts       # Category search + product category link tools
     variants.ts         # Variant lifecycle tools
     relationships.ts    # Relationship discovery + product relationship write tools
-  supplyline/           # Supplyline-specific customizations
+  extensions/           # Optional deployment-specific customizations
 wrangler.toml           # Cloudflare Workers configuration
 docs/
   remote-setup.md       # Remote server setup guide
@@ -301,7 +301,7 @@ This MCP server is intentionally **stateless and lightweight**:
 - **No background jobs** — Request/response only
 - **Ephemeral in-memory cache** — Brief (60s) request deduplication, cleared on restart
 
-For ETL, sync, or persistent caching needs, use a separate tool like [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
+For ETL, sync, or persistent caching needs, pair this server with a separate persistence layer.
 
 ## License
 

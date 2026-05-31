@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Plytix MCP Server
  *
@@ -19,10 +20,34 @@ import { registerIdentifierTools } from './tools/identifier.js';
 import { registerProductAttributeTools } from './tools/product-attributes.js';
 import { registerRelationshipTools } from './tools/relationships.js';
 
+const VERSION = '0.2.0';
+
+function printUsage(): void {
+  process.stdout.write(
+    `plytix-mcp ${VERSION}\n` +
+      'Model Context Protocol server for Plytix PIM (runs over stdio).\n\n' +
+      'Requires PLYTIX_API_KEY and PLYTIX_API_PASSWORD environment variables\n' +
+      '(see .env.example).\n\n' +
+      'Options:\n' +
+      '  -h, --help     Show this help and exit\n' +
+      '  -v, --version  Show version and exit\n'
+  );
+}
+
 async function main() {
+  const arg = process.argv[2];
+  if (arg === '--help' || arg === '-h') {
+    printUsage();
+    return;
+  }
+  if (arg === '--version' || arg === '-v') {
+    process.stdout.write(`${VERSION}\n`);
+    return;
+  }
+
   const server = new McpServer({
     name: 'plytix-mcp',
-    version: '0.2.0',
+    version: VERSION,
   });
 
   const client = new PlytixClient();
@@ -37,6 +62,9 @@ async function main() {
   registerProductAttributeTools(server, client);
   registerRelationshipTools(server, client);
   registerIdentifierTools(server);
+
+  // Optional: deployment-specific tools. To enable, import registerCustomTools from
+  // './extensions/index.js' and call it here: registerCustomTools(server, client);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

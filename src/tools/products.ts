@@ -268,6 +268,18 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     },
     async (args) => {
       try {
+        // Normalize [field, operator, value] tuples to objects (parity with the worker).
+        if (Array.isArray(args.filters)) {
+          args.filters = (args.filters as unknown[]).map((group) =>
+            Array.isArray(group)
+              ? group.map((item) =>
+                  Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string'
+                    ? { field: item[0], operator: item[1], value: item[2] }
+                    : item
+                )
+              : group
+          ) as typeof args.filters;
+        }
         const result = await client.searchProducts(args as Parameters<typeof client.searchProducts>[0]);
 
         return {
@@ -556,7 +568,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_assign_family',
     {
       title: 'Assign Product Family',
-      description: 'Assign or unassign a family.',
+      description: 'Assign or unassign a family. WARNING: reassigning a family can permanently drop attribute values not present in the target family.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         family_id: z

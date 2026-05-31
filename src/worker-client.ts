@@ -34,8 +34,26 @@ const DEFAULT_CONFIG = {
 };
 
 // Module-level JWT cache — survives across requests within the same CF Worker isolate.
-// Keyed by API key so multiple credentials don't collide.
+// Keyed by a non-reversible digest of BOTH credentials so a cached token is only ever
+// reused for the exact api_key + api_password pair that minted it.
 const tokenCache = new Map<string, PlytixAuthToken>();
+
+// De-dupes concurrent token fetches for the same credentials so a cold isolate (or a
+// post-expiry burst) fires a single auth request instead of one per in-flight call.
+const tokenInFlight = new Map<string, Promise<string>>();
+
+/**
+ * Derives a non-reversible cache key from both credentials. Using a SHA-256 digest
+ * avoids holding the plaintext api_password in a Map key while still scoping a cached
+ * token to the exact credential pair.
+ */
+async function deriveCacheKey(apiKey: string, apiPassword: string): Promise<string> {
+  const data = new TextEncoder().encode(`${apiKey}:${apiPassword}`);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
 
 export interface WorkerClientConfig {
   apiKey: string;
@@ -50,6 +68,7 @@ export class WorkerPlytixClient {
   private config: Required<PlytixClientConfig>;
   private attributeCache?: Map<string, PlytixAttributeDetail>;
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
+  private cacheKeyPromise?: Promise<string>;
 
   constructor(config: WorkerClientConfig) {
     if (!config.apiKey || !config.apiPassword) {
@@ -69,22 +88,45 @@ export class WorkerPlytixClient {
   // Authentication
   // ─────────────────────────────────────────────────────────────
 
+  private getCacheKey(): Promise<string> {
+    if (!this.cacheKeyPromise) {
+      this.cacheKeyPromise = deriveCacheKey(this.config.apiKey, this.config.apiPassword);
+    }
+    return this.cacheKeyPromise;
+  }
+
   private async getToken(): Promise<string> {
     const now = Date.now();
-    const cacheKey = this.config.apiKey;
 
-    // Check module-level cache first (survives across requests in same isolate)
+    // Instance-level cache fast-path (no async key derivation needed)
+    if (this.token && now < this.token.exp - 60_000) {
+      return this.token.value;
+    }
+
+    const cacheKey = await this.getCacheKey();
+
+    // Module-level cache (survives across requests in same isolate)
     const cached = tokenCache.get(cacheKey);
     if (cached && now < cached.exp - 60_000) {
       this.token = cached;
       return cached.value;
     }
 
-    // Fall back to instance-level cache
-    if (this.token && now < this.token.exp - 60_000) {
-      return this.token.value;
-    }
+    // De-dupe concurrent fetches for the same credentials: if an auth request for this
+    // exact credential pair is already in flight, await it instead of starting another.
+    const inFlight = tokenInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
 
+    const fetchPromise = this.fetchToken(cacheKey);
+    tokenInFlight.set(cacheKey, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      tokenInFlight.delete(cacheKey);
+    }
+  }
+
+  private async fetchToken(cacheKey: string): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
@@ -121,10 +163,10 @@ export class WorkerPlytixClient {
       const expiresIn = (tokenData.expires_in ?? 900) * 1000;
       this.token = {
         value: tokenData.access_token,
-        exp: now + expiresIn,
+        exp: Date.now() + expiresIn,
       };
 
-      // Persist to module-level cache for other instances with the same credentials
+      // Persist to module-level cache, keyed by the credential-pair digest.
       tokenCache.set(cacheKey, this.token);
 
       return this.token.value;
@@ -204,7 +246,7 @@ export class WorkerPlytixClient {
 
       // Token expired - clear both caches and retry
       if (response.status === 401 && retries > 0) {
-        tokenCache.delete(this.config.apiKey);
+        tokenCache.delete(await this.getCacheKey());
         this.token = undefined;
         return this.request(endpoint, options, retries - 1);
       }

@@ -42,8 +42,8 @@ src/
     categories.ts       # Category search + product category link tools
     variants.ts         # Variant lifecycle tools
     relationships.ts    # Relationship discovery + product relationship write tools
-  supplyline/           # Supplyline-specific customizations
-    index.ts            # Supplyline tool registration
+  extensions/           # Optional deployment-specific customizations
+    index.ts            # Custom tool registration (registerCustomTools)
 ```
 
 ## Available MCP Tools
@@ -122,19 +122,20 @@ The lookup system automatically detects identifier types and uses staged search 
 3. Text search across multiple fields
 4. Broad LIKE search (last resort)
 
-## Code Organization: Generic vs Supplyline-Specific
+## Code Organization: Core vs Extensions
 
-**Generic tools (`src/tools/`):**
+**Core tools (`src/tools/`):**
 - Should work for any Plytix user
-- No Supplyline-specific business logic
+- No deployment-specific business logic
 - Follow standard Plytix API patterns
 
-**Supplyline-specific (`src/supplyline/`):**
-- Custom workflows, business rules, or integrations
+**Custom extensions (`src/extensions/`):**
+- Optional, deployment-specific workflows, business rules, or integrations
 - May use non-standard approaches
 - Not guaranteed to be generally applicable
+- Ships empty by default; register via `registerCustomTools` (see `src/index.ts`)
 
-When adding new functionality, ask: "Would this be useful to any Plytix user, or is this specific to Supplyline's workflow?"
+When adding new functionality, ask: "Would this be useful to any Plytix user, or is it specific to one deployment's workflow?"
 
 ## Environment Variables
 

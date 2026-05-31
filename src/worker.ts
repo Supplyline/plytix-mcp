@@ -76,6 +76,28 @@ const ALLOWED_ORIGINS = [
   'http://localhost:8080',
 ];
 
+function clientSafeError(error: unknown): string {
+  // PlytixError carries the upstream HTTP status and the raw upstream body in its message.
+  // Surface only a generic, status-based message to callers; log the full detail server-side.
+  if (error && typeof error === 'object' && 'status' in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === 'number') {
+      console.error('[plytix-mcp] upstream error:', error);
+      return `Upstream Plytix request failed (HTTP ${status})`;
+    }
+  }
+  return error instanceof Error ? error.message : 'Internal error';
+}
+
+function isAllowedClaudeOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    return u.protocol === 'https:' && (u.hostname === 'claude.ai' || u.hostname.endsWith('.claude.ai'));
+  } catch {
+    return false;
+  }
+}
+
 function getCorsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get('Origin') || '';
   const headers: Record<string, string> = {
@@ -84,8 +106,10 @@ function getCorsHeaders(request: Request): Record<string, string> {
     'Access-Control-Max-Age': '86400',
   };
 
-  // Only allow specific origins (Claude clients and local development)
-  if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.claude.ai')) {
+  // Only allow specific origins (Claude clients and local development). Parse with URL()
+  // to require https and an exact claude.ai host/subdomain — a bare endsWith('.claude.ai')
+  // would also accept plaintext-http and lookalike hosts like "evil.claude.ai.attacker.com".
+  if (ALLOWED_ORIGINS.includes(origin) || isAllowedClaudeOrigin(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
   }
   // For requests without an allowed origin, don't set Access-Control-Allow-Origin
@@ -429,7 +453,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_assign_family',
-    description: 'Assign or unassign a family.',
+    description: 'Assign or unassign a family. WARNING: reassigning a family can permanently drop attribute values not present in the target family.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1553,7 +1577,18 @@ const toolHandlers: Record<string, ToolHandler> = {
     const body: Record<string, unknown> = {};
 
     if (args.filters !== undefined) {
-      body.filters = args.filters;
+      // Normalize [field, operator, value] tuples to objects (parity with products_search).
+      body.filters = Array.isArray(args.filters)
+        ? (args.filters as unknown[]).map((group) =>
+            Array.isArray(group)
+              ? group.map((item) =>
+                  Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string'
+                    ? { field: item[0], operator: item[1], value: item[2] }
+                    : item
+                )
+              : group
+          )
+        : args.filters;
     }
     if (args.pagination !== undefined) {
       body.pagination = args.pagination;
@@ -1754,6 +1789,18 @@ const toolHandlers: Record<string, ToolHandler> = {
       ...(args.attributes !== undefined ? { attributes: args.attributes as Record<string, unknown> } : {}),
     });
     const variant = result.data?.[0];
+
+    if (!variant?.id) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Variant creation under ${parentProductId} returned no confirmed variant. The write may not have been applied.`,
+          },
+        ],
+        isError: true,
+      };
+    }
 
     return {
       content: [
@@ -1981,6 +2028,9 @@ const toolHandlers: Record<string, ToolHandler> = {
     const relationshipId = args.relationship_id as string;
     const relatedProductId = args.related_product_id as string;
     const quantity = args.quantity as number | undefined;
+    if (quantity !== undefined && (!Number.isFinite(quantity) || quantity < 0)) {
+      throw new Error('quantity must be a non-negative number');
+    }
 
     await client.linkProductRelationship(productId, relationshipId, [
       {
@@ -2042,6 +2092,9 @@ const toolHandlers: Record<string, ToolHandler> = {
     const relationshipId = args.relationship_id as string;
     const relatedProductId = args.related_product_id as string;
     const quantity = args.quantity as number;
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      throw new Error('quantity must be a non-negative number');
+    }
 
     await client.updateProductRelationship(productId, relationshipId, [
       { product_id: relatedProductId, quantity },
@@ -2150,7 +2203,7 @@ async function handleMcpRequest(
               content: [
                 {
                   type: 'text',
-                  text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  text: `Error: ${clientSafeError(error)}`,
                 },
               ],
               isError: true,
@@ -2193,7 +2246,7 @@ async function handleMcpRequest(
       id: id ?? null,
       error: {
         code: -32603,
-        message: error instanceof Error ? error.message : 'Internal error',
+        message: clientSafeError(error),
       },
     };
   }
@@ -2240,7 +2293,7 @@ export default {
               {
                 type: 'bearer',
                 format: 'Bearer <api_key>:<api_password>',
-                note: 'For Craft Agents and other MCP clients',
+                note: 'For MCP clients that send credentials via an Authorization header',
               },
             ],
           },
@@ -2258,6 +2311,16 @@ export default {
       let bodyText: string;
       try {
         bodyText = await request.text();
+        if (bodyText.length > 256 * 1024) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32600, message: 'Request body too large (max 262144 bytes)' },
+            }),
+            { status: 413, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
         body = JSON.parse(bodyText);
       } catch {
         return new Response(
@@ -2287,7 +2350,7 @@ export default {
       let apiKey = request.headers.get('X-Plytix-API-Key');
       let apiPassword = request.headers.get('X-Plytix-API-Password');
 
-      // Fallback to Bearer token format for Craft Agents compatibility
+      // Fallback to Bearer token for clients that only support an Authorization header
       if (!apiKey || !apiPassword) {
         const authHeader = request.headers.get('Authorization');
         if (authHeader?.startsWith('Bearer ')) {
@@ -2349,6 +2412,16 @@ export default {
 
       // Handle batch requests
       if (Array.isArray(body)) {
+        if (body.length > 50) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32600, message: 'Batch too large (max 50 requests)' },
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
         const responses = await Promise.all(
           body.map((req) => handleMcpRequest(req, client))
         );
