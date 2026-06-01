@@ -59,9 +59,28 @@ so the pinned form still tries to reach the registry (verified: `npx --offline
 mcp-remote@0.1.38` reports "package not found, will be installed"). Pinning the
 version in the wrapper therefore does not remove the boot-time network dependency.
 
-The only way to take `npx` (and the network) out of the boot path is a fixed install:
-`npm install -g mcp-remote@<version>` and call the `mcp-remote` binary directly. That
-is an explicit install decision; until then, the rare reboot toast self-heals on relaunch.
+The fix is to take `npx` (and the registry) out of the boot path entirely — install
+`mcp-remote` once and call the binary directly. A self-contained prefix avoids `sudo`
+and an unstable npx cache path:
+
+```bash
+npm install -g mcp-remote@0.1.38 --prefix "$HOME/.claude/mcp-tools"
+# wrapper then execs the absolute path, with an npx fallback if the install is missing:
+#   MCP_REMOTE="$HOME/.claude/mcp-tools/bin/mcp-remote"
+#   [ -x "$MCP_REMOTE" ] && exec "$MCP_REMOTE" "$@" || exec npx -y mcp-remote "$@"
+```
+
+This removes the npm-registry round-trip (the cold-boot race). It does **not** remove
+the dependency on `node` itself: the installed `mcp-remote` bin is a Node script
+(`#!/usr/bin/env node` → `dist/proxy.js`), so `node` must be resolvable by the launched
+process. Under a Claude Desktop / macOS GUI launch the login shell and nvm are **not**
+sourced, so the wrapper's `export PATH="/usr/local/bin:/bin:/usr/bin:$PATH"` line — which
+puts a current `node` on `PATH` — is load-bearing and must stay. (`--prefix` only
+stabilizes the `mcp-remote` *binary* path; it does nothing for `node` resolution.)
+
+With both in place, startup is just `node <local-file>` (verified ~2.3s to connect, no
+registry round-trip), so the cold-boot race no longer occurs. The remote connection
+itself still needs the network to be up, but that is the actual work, not a resolution race.
 
 ## Auth model (verified, intentional — not a bypass)
 

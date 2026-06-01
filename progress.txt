@@ -33,13 +33,18 @@ Changes made:
   secret; the exact config entry still authenticates with a minimal env. Old config
   backed up to claude_desktop_config.json.pre-plytix-secrets-fix.bak (chmod 600).
 
-Investigated but deliberately NOT done:
-- Pinning mcp-remote in the wrapper does NOT fix the reboot race (npx caches by exact
-  spec string; a pinned spec still hits the registry). The durable fix is
-  `npm install -g mcp-remote@<ver>` + call the binary directly — left for explicit
-  approval since it's an install.
+Durable startup fix (applied 2026-06-01, approved):
+- Pinning the npx spec does NOT help (npx caches by exact spec string; a pinned spec
+  still hits the registry). So removed npx from the boot path entirely:
+  `npm install -g mcp-remote@0.1.38 --prefix ~/.claude/mcp-tools` and pointed the
+  wrapper at the absolute binary (~/.claude/mcp-tools/bin/mcp-remote), with an npx
+  fallback if that install ever goes missing. Startup is now a local `node` exec —
+  no npm-registry round-trip — so the cold-boot race is gone. Verified: real config
+  entry connects in ~2.3s, authenticates, secret stays a placeholder in argv.
+  (mcp-remote@0.1.38: latest, published 2026-02-05, maintainers threepointone/geelen,
+  ~338k weekly downloads.)
 
 Next steps / open:
-- Decide whether to do the global mcp-remote install to fully remove the boot-time
-  network dependency.
 - The repo .env still holds real creds for local stdio testing (gitignored) — fine.
+- If ~/.claude/mcp-tools is ever wiped, the wrapper falls back to npx automatically;
+  re-run the npm install above to restore the pinned binary.
