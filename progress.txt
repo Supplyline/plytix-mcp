@@ -1,0 +1,45 @@
+PROGRESS LOG — plytix-mcp
+=========================
+Session handoff notes. Newest entry on top.
+
+
+2026-06-01 — "Could not attach to MCP server plytix" investigation + hardening
+------------------------------------------------------------------------------
+Trigger: after a reboot, Claude (Desktop) showed "Could not attach to MCP server plytix".
+
+Findings:
+- `plytix` is the REMOTE Cloudflare Worker, reached via an mcp-remote stdio→HTTP
+  bridge (~/.claude/mcp-remote-plytix.sh → npx -y mcp-remote → worker /mcp). It is
+  configured in Claude Desktop's claude_desktop_config.json, NOT ~/.claude.json — which
+  is why `claude mcp list` doesn't show it but a Desktop/local-agent session has the tools.
+- Root cause of the toast: transient cold-start race — `npx mcp-remote@latest` doing a
+  registry round-trip before the network was up at reboot. Worker itself was healthy
+  (HTTP 200, <1s). Self-heals on relaunch. NOT related to the recent worker-auth commit
+  (b6062eb didn't touch the auth gate).
+- Verified BOTH transports work end-to-end: remote worker suite 10/10, local stdio
+  handshake + authed round-trip OK.
+- Security: confirmed the worker's auth model is intentional and intact — initialize/
+  tools/list are public (200), tools/call without creds is rejected (-32600). No PIM leak.
+
+Changes made:
+- REPO (PR): test-worker.js — replaced the stale "initialize must 401" assertion with
+  (a) "public handshake initialize → 200" and (b) a new "tools/call without creds must be
+  rejected" auth-boundary regression test. Suite now 10/10; unit tests 33/33.
+- REPO: docs/solutions/integration-issues/mcp-attach-failure-and-transports.md (diagnosis).
+- LOCAL (not repo): moved Plytix creds out of argv. Secrets now live in
+  ~/.claude/plytix-mcp.env (chmod 600); wrapper sources it; Desktop config passes the
+  literal ${PLYTIX_API_KEY}/${PLYTIX_API_PASSWORD} placeholders, which mcp-remote
+  substitutes from env at request time. Verified: ps shows only placeholders, never the
+  secret; the exact config entry still authenticates with a minimal env. Old config
+  backed up to claude_desktop_config.json.pre-plytix-secrets-fix.bak (chmod 600).
+
+Investigated but deliberately NOT done:
+- Pinning mcp-remote in the wrapper does NOT fix the reboot race (npx caches by exact
+  spec string; a pinned spec still hits the registry). The durable fix is
+  `npm install -g mcp-remote@<ver>` + call the binary directly — left for explicit
+  approval since it's an install.
+
+Next steps / open:
+- Decide whether to do the global mcp-remote install to fully remove the boot-time
+  network dependency.
+- The repo .env still holds real creds for local stdio testing (gitignored) — fine.
