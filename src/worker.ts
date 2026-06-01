@@ -2145,7 +2145,7 @@ async function handleMcpRequest(
             },
             serverInfo: {
               name: 'plytix-mcp',
-              version: '0.2.0',
+              version: '0.2.1',
             },
           },
         };
@@ -2278,7 +2278,7 @@ export default {
       return new Response(
         JSON.stringify({
           name: 'plytix-mcp',
-          version: '0.2.0',
+          version: '0.2.1',
           description: 'Remote MCP server for Plytix PIM',
           endpoints: {
             mcp: '/mcp',
