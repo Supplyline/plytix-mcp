@@ -59,9 +59,20 @@ so the pinned form still tries to reach the registry (verified: `npx --offline
 mcp-remote@0.1.38` reports "package not found, will be installed"). Pinning the
 version in the wrapper therefore does not remove the boot-time network dependency.
 
-The only way to take `npx` (and the network) out of the boot path is a fixed install:
-`npm install -g mcp-remote@<version>` and call the `mcp-remote` binary directly. That
-is an explicit install decision; until then, the rare reboot toast self-heals on relaunch.
+The fix is to take `npx` (and the registry) out of the boot path entirely — install
+`mcp-remote` once and call the binary directly. Use a self-contained prefix so it needs
+no `sudo` and no `PATH`/nvm dependency:
+
+```bash
+npm install -g mcp-remote@0.1.38 --prefix "$HOME/.claude/mcp-tools"
+# wrapper then execs the absolute path, with an npx fallback if the install is missing:
+#   MCP_REMOTE="$HOME/.claude/mcp-tools/bin/mcp-remote"
+#   [ -x "$MCP_REMOTE" ] && exec "$MCP_REMOTE" "$@" || exec npx -y mcp-remote "$@"
+```
+
+After this, startup is just `node <local-file>` (verified ~2.3s to connect, no registry
+round-trip), so the cold-boot race no longer occurs. The remote connection itself still
+needs the network to be up, but that is the actual work, not a resolution race.
 
 ## Auth model (verified, intentional — not a bypass)
 
