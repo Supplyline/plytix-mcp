@@ -46,9 +46,13 @@ const tokenInFlight = new Map<string, Promise<string>>();
  * Derives a non-reversible cache key from both credentials. Using a SHA-256 digest
  * avoids holding the plaintext api_password in a Map key while still scoping a cached
  * token to the exact credential pair.
+ *
+ * The pair is JSON-encoded (not joined with a delimiter) so the digest is unambiguous:
+ * a naive `${apiKey}:${apiPassword}` would collide for pairs like ("a:b","c") and
+ * ("a","b:c"), letting one credential pair reuse a token minted for another.
  */
 async function deriveCacheKey(apiKey: string, apiPassword: string): Promise<string> {
-  const data = new TextEncoder().encode(`${apiKey}:${apiPassword}`);
+  const data = new TextEncoder().encode(JSON.stringify([apiKey, apiPassword]));
   const digest = await crypto.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
