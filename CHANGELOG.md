@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-31
+
+Follow-up fixes from post-merge code review. No breaking changes.
+
+### Security
+- The Worker request-body cap now measures UTF-8 byte length and checks `Content-Length`
+  up front, instead of `String.length` (UTF-16 code units). A multi-byte JSON payload could
+  previously exceed 256 KB on the wire while passing the character-count check.
+- The token-cache key now derives from `JSON.stringify([apiKey, apiPassword])` instead of
+  `` `${apiKey}:${apiPassword}` ``. The delimiter form was ambiguous — pairs like
+  `("a:b","c")` and `("a","b:c")` hashed identically, which could let one credential pair
+  reuse a token minted for another and undo the v0.2.1 cache-key hardening.
+
 ## [0.2.1] - 2026-05-31
 
 Security hardening, bug fixes, and public-readiness cleanup. No breaking changes.

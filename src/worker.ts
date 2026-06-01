@@ -2145,7 +2145,7 @@ async function handleMcpRequest(
             },
             serverInfo: {
               name: 'plytix-mcp',
-              version: '0.2.1',
+              version: '0.2.2',
             },
           },
         };
@@ -2278,7 +2278,7 @@ export default {
       return new Response(
         JSON.stringify({
           name: 'plytix-mcp',
-          version: '0.2.1',
+          version: '0.2.2',
           description: 'Remote MCP server for Plytix PIM',
           endpoints: {
             mcp: '/mcp',
@@ -2307,19 +2307,32 @@ export default {
     // MCP endpoint
     if (url.pathname === '/mcp' && request.method === 'POST') {
       // Parse JSON-RPC request first to check if auth is needed
+      const MAX_BODY_BYTES = 256 * 1024;
+      const tooLargeResponse = () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            error: { code: -32600, message: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
+          }),
+          { status: 413, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+
+      // Reject oversized payloads up front when Content-Length is present (avoids decoding
+      // the whole body just to reject it). Content-Length counts wire bytes, not characters.
+      const contentLength = Number(request.headers.get('Content-Length'));
+      if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+        return tooLargeResponse();
+      }
+
       let body: JsonRpcRequest | JsonRpcRequest[];
       let bodyText: string;
       try {
         bodyText = await request.text();
-        if (bodyText.length > 256 * 1024) {
-          return new Response(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: null,
-              error: { code: -32600, message: 'Request body too large (max 262144 bytes)' },
-            }),
-            { status: 413, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
-          );
+        // Measure decoded body by UTF-8 byte length, not String.length (UTF-16 code units).
+        // A multi-byte payload can exceed the cap on the wire while String.length stays under it.
+        if (new TextEncoder().encode(bodyText).length > MAX_BODY_BYTES) {
+          return tooLargeResponse();
         }
         body = JSON.parse(bodyText);
       } catch {
