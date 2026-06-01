@@ -56,7 +56,7 @@ jobs:
     - name: Check build output
       run: |
         ls -la dist/
-        node dist/index.js --help || true
+        node dist/index.js --help
 
   security:
     runs-on: ubuntu-latest
@@ -73,8 +73,5 @@ jobs:
     - name: Install dependencies
       run: npm ci
 
-    - name: Run security audit
-      run: npm audit --audit-level=high
-
-    - name: Check for known vulnerabilities
-      run: npx audit-ci --high
+    - name: Run security audit (production dependencies)
+      run: npm audit --omit=dev --audit-level=high

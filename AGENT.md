@@ -6,7 +6,7 @@ This file exists for AI assistants that look for `AGENT.md` by convention (Curso
 
 - Build & test commands
 - Project structure
-- Code organization guidelines (generic vs Supplyline-specific)
+- Code organization guidelines (core tools vs custom extensions)
 - Environment variables
 - Architecture notes
 

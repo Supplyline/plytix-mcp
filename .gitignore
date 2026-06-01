@@ -22,6 +22,10 @@ build/
 *.swp
 *.swo
 
+# Claude Code local config (machine-specific permissions/history — do not commit)
+.claude/settings.local.json
+.claude/*.local.json
+
 # OS files
 .DS_Store
 Thumbs.db

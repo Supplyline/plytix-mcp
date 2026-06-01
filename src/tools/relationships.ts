@@ -129,7 +129,7 @@ export function registerRelationshipTools(server: McpServer, client: PlytixClien
         product_id: z.string().min(1).describe('Primary product ID'),
         relationship_id: z.string().min(1).describe('Relationship definition ID'),
         related_product_id: z.string().min(1).describe('Related product ID to link'),
-        quantity: z.number().positive().optional().describe('Optional relationship quantity'),
+        quantity: z.number().nonnegative().optional().describe('Optional relationship quantity'),
       },
     },
     async ({ product_id, relationship_id, related_product_id, quantity }) => {

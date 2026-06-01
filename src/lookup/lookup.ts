@@ -413,6 +413,11 @@ export class PlytixLookup {
           body: { filters: [[{ field: 'gtin', operator: 'eq', value: identifier }]] },
           tag: 'gtin_eq',
         });
+        // A numeric value detects as GTIN but may actually be a SKU — also try sku.
+        exactSearches.push({
+          body: { filters: [[{ field: 'sku', operator: 'eq', value: identifier }]] },
+          tag: 'sku_eq',
+        });
       } else if (field === 'label' && type === 'label') {
         const tokens = identifier.split(/[^A-Za-z0-9]+/).filter(Boolean);
         exactSearches.push({
@@ -580,7 +585,10 @@ export class PlytixLookup {
       });
 
       matches.sort((a, b) => b.confidence - a.confidence);
-      return { selected: matches[0], matches, plan };
+      // With no criteria this is a catalog browse, not a match — don't auto-select a
+      // confident "winner" from an arbitrary first page.
+      const selected = filters.length > 0 ? matches[0] : undefined;
+      return { selected, matches, plan };
     } catch {
       plan.push('multi_criteria_search_failed');
       return { matches: [], plan };

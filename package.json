@@ -1,6 +1,6 @@
 {
   "name": "plytix-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "MCP server for Plytix PIM API integration. Enables AI assistants to read, write, and manage product data, assets, categories, and relationships.",
   "keywords": [
@@ -37,6 +37,7 @@
     "dev:worker": "wrangler dev",
     "build": "tsc",
     "build:worker": "tsc --project tsconfig.worker.json",
+    "prepack": "npm run build",
     "start": "node dist/index.js",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
