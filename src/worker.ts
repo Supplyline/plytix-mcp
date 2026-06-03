@@ -23,6 +23,12 @@ interface Env {
   PLYTIX_API_BASE?: string;
   PLYTIX_AUTH_URL?: string;
   OAUTH_KV?: KVNamespace;
+  // Secret used to derive the AES-GCM key that encrypts stored Plytix
+  // credentials at rest in OAUTH_KV. Set via `wrangler secret put
+  // OAUTH_TOKEN_SECRET`. When OAUTH_KV is configured, the OAuth endpoints
+  // refuse to operate without this secret so credentials are never stored
+  // in plaintext.
+  OAUTH_TOKEN_SECRET?: string;
 }
 
 interface JsonRpcRequest {
@@ -132,10 +138,80 @@ function generateToken(bytes = 32): string {
 async function computeS256(verifier: string): Promise<string> {
   const data = new TextEncoder().encode(verifier);
   const hash = await crypto.subtle.digest('SHA-256', data);
-  return btoa(String.fromCharCode(...new Uint8Array(hash)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+  return base64urlEncode(new Uint8Array(hash));
+}
+
+function base64urlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64urlDecode(value: string): Uint8Array {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// Derive a stable AES-GCM key from the configured secret. The secret is
+// stretched through SHA-256 to a fixed 256-bit key.
+async function deriveCredKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+  return crypto.subtle.importKey('raw', material, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+// Encrypt the Plytix credential pair for storage in KV. Output is
+// base64url(iv[12] || ciphertext+tag). A fresh random IV is used per call.
+async function encryptCreds(
+  creds: { api_key: string; api_password: string },
+  secret: string
+): Promise<string> {
+  const key = await deriveCredKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(creds));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext)
+  );
+  const combined = new Uint8Array(iv.length + ciphertext.length);
+  combined.set(iv, 0);
+  combined.set(ciphertext, iv.length);
+  return base64urlEncode(combined);
+}
+
+// Decrypt a credential blob produced by encryptCreds. Throws if the secret
+// is wrong or the blob is tampered (AES-GCM authentication failure).
+async function decryptCreds(
+  blob: string,
+  secret: string
+): Promise<{ api_key: string; api_password: string }> {
+  const key = await deriveCredKey(secret);
+  const combined = base64urlDecode(blob);
+  const iv = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+// Validate that a request's redirect_uri exactly matches one the client
+// registered via Dynamic Client Registration. Returns true only when the
+// client exists and the redirect_uri is an exact-string member of its
+// registered list. This is the control that prevents authorization codes
+// (and the credentials they unlock) from being delivered to an
+// attacker-controlled URL.
+async function isRegisteredRedirectUri(
+  kv: KVNamespace,
+  clientId: string,
+  redirectUri: string
+): Promise<boolean> {
+  if (!clientId || !redirectUri) return false;
+  const client = (await kv.get(`client:${clientId}`, 'json')) as {
+    redirect_uris?: unknown;
+  } | null;
+  if (!client || !Array.isArray(client.redirect_uris)) return false;
+  return client.redirect_uris.includes(redirectUri);
 }
 
 function escapeHtml(str: string): string {
@@ -2438,6 +2514,13 @@ export default {
     // ── Authorization Endpoint ───────────────────────────────────
 
     if (url.pathname === '/authorize' && request.method === 'GET') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
       const clientId = url.searchParams.get('client_id') || '';
       const redirectUri = url.searchParams.get('redirect_uri') || '';
       const state = url.searchParams.get('state') || '';
@@ -2460,6 +2543,27 @@ export default {
         );
       }
 
+      // Only S256 PKCE is supported (and advertised in metadata). Reject any
+      // other method up front rather than silently treating it as S256.
+      if (codeChallengeMethod !== 'S256') {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'code_challenge_method must be S256' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Reject before rendering the credential form unless the redirect_uri is
+      // registered to this client. Without this the worker's own login page
+      // becomes a credential-harvesting oracle: an attacker who initiates the
+      // flow with their own redirect_uri + PKCE challenge would receive an auth
+      // code (and thus the victim's credentials) at a URL they control.
+      if (!(await isRegisteredRedirectUri(env.OAUTH_KV, clientId, redirectUri))) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
       return new Response(
         renderAuthorizePage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope }),
         { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
@@ -2467,9 +2571,17 @@ export default {
     }
 
     if (url.pathname === '/authorize' && request.method === 'POST') {
-      if (!env.OAUTH_KV) {
+      const oauthKv = env.OAUTH_KV;
+      if (!oauthKv) {
         return new Response(
           JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const tokenSecret = env.OAUTH_TOKEN_SECRET;
+      if (!tokenSecret) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth credential encryption not configured' }),
           { status: 500, headers: { 'Content-Type': 'application/json' } }
         );
       }
@@ -2483,6 +2595,24 @@ export default {
       const scope = (formData.get('scope') as string) || '';
       const apiKey = (formData.get('api_key') as string) || '';
       const apiPassword = (formData.get('api_password') as string) || '';
+
+      // Re-validate the redirect_uri against the registered client — never
+      // trust the hidden form field. On failure return an error directly; do
+      // NOT redirect to the supplied URL (that redirect is the exfil sink).
+      if (!(await isRegisteredRedirectUri(oauthKv, clientId, redirectUri))) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Enforce S256 PKCE (matches advertised metadata).
+      if (codeChallengeMethod !== 'S256' || !codeChallenge) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'code_challenge with method S256 is required' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
 
       if (!apiKey || !apiPassword) {
         return new Response(
@@ -2522,22 +2652,22 @@ export default {
         );
       }
 
-      // Generate auth code and store with credentials
+      // Generate auth code and store with ENCRYPTED credentials (10-min TTL).
       const code = generateToken(32);
-      await env.OAUTH_KV.put(
+      const encCreds = await encryptCreds({ api_key: apiKey, api_password: apiPassword }, tokenSecret);
+      await oauthKv.put(
         `code:${code}`,
         JSON.stringify({
           client_id: clientId,
           redirect_uri: redirectUri,
           code_challenge: codeChallenge,
           code_challenge_method: codeChallengeMethod,
-          api_key: apiKey,
-          api_password: apiPassword,
+          enc_creds: encCreds,
         }),
         { expirationTtl: 600 } // 10 minute TTL for auth codes
       );
 
-      // Redirect back to client with auth code
+      // Redirect back to the (validated) client with the auth code.
       const redirect = new URL(redirectUri);
       redirect.searchParams.set('code', code);
       if (state) redirect.searchParams.set('state', state);
@@ -2592,9 +2722,7 @@ export default {
         client_id: string;
         redirect_uri: string;
         code_challenge: string;
-        code_challenge_method: string;
-        api_key: string;
-        api_password: string;
+        enc_creds: string;
       } | null;
 
       if (!codeData) {
@@ -2624,22 +2752,26 @@ export default {
         );
       }
 
-      // Generate access token and store with credentials (no expiration)
+      // Generate access token. Carry the already-encrypted credential blob
+      // from the auth code straight into the token record (same key, so no
+      // decrypt/re-encrypt needed) and bound the token's lifetime.
       const accessToken = generateToken(32);
+      const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
       await env.OAUTH_KV.put(
         `token:${accessToken}`,
         JSON.stringify({
-          api_key: codeData.api_key,
-          api_password: codeData.api_password,
+          enc_creds: codeData.enc_creds,
           client_id: codeData.client_id,
           created_at: new Date().toISOString(),
-        })
+        }),
+        { expirationTtl: TOKEN_TTL_SECONDS }
       );
 
       return new Response(
         JSON.stringify({
           access_token: accessToken,
           token_type: 'bearer',
+          expires_in: TOKEN_TTL_SECONDS,
         }),
         { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
       );
@@ -2757,15 +2889,20 @@ export default {
             // BYOK format: key:password
             apiKey = token.slice(0, colonIndex);
             apiPassword = token.slice(colonIndex + 1);
-          } else if (env.OAUTH_KV) {
-            // OAuth token — look up credentials in KV
+          } else if (env.OAUTH_KV && env.OAUTH_TOKEN_SECRET) {
+            // OAuth token — resolve the encrypted credential blob from KV.
             const tokenData = (await env.OAUTH_KV.get(`token:${token}`, 'json')) as {
-              api_key: string;
-              api_password: string;
+              enc_creds?: string;
             } | null;
-            if (tokenData) {
-              apiKey = tokenData.api_key;
-              apiPassword = tokenData.api_password;
+            if (tokenData?.enc_creds) {
+              try {
+                const creds = await decryptCreds(tokenData.enc_creds, env.OAUTH_TOKEN_SECRET);
+                apiKey = creds.api_key;
+                apiPassword = creds.api_password;
+              } catch {
+                // Tampered or undecryptable blob — leave credentials unset so
+                // the request falls through to the 401 below.
+              }
             }
           }
         }

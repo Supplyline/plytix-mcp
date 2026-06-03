@@ -30,6 +30,13 @@ command = "npm run build:worker"
 binding = "OAUTH_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
+# OAuth requires a secret used to encrypt stored Plytix credentials at rest.
+# It is NOT declared here (secrets never live in wrangler.toml). Set it with:
+#   wrangler secret put OAUTH_TOKEN_SECRET
+# Use a long random value (e.g. `openssl rand -hex 32`). When OAUTH_KV is
+# configured but this secret is unset, the OAuth /authorize endpoint refuses
+# to issue codes so credentials are never persisted in plaintext.
+
 # Observability
 [observability]
 enabled = true
