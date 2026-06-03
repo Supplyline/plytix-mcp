@@ -28,7 +28,7 @@ command = "npm run build:worker"
 # Then paste the ID below
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "7a077b34c5e94d3ba277fee716efe2f0"
 
 # OAuth requires a secret used to encrypt stored Plytix credentials at rest.
 # It is NOT declared here (secrets never live in wrangler.toml). Set it with:
