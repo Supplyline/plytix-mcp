@@ -1,6 +1,6 @@
 # SPEC - Batch Product Export tools
 
-> **Status:** Draft for review
+> **Status:** Implemented
 > **Date:** 2026-06-09
 > **Consumer:** operator/agent live Plytix snapshots for ETL and sync diffs
 
@@ -72,11 +72,15 @@ Rules:
   and exports matched product rows.
 - `mode: "product_ids"` calls `GET /api/v2/products/:product_id` for each ID.
 - Search with no filters is rejected unless `confirm_full_catalog: true`.
+- Empty search means `filters` is omitted, `null`, an empty array, or only empty filter
+  groups after normalization, such as `filters: [[]]`.
 - SKU/product ID selectors preserve input order in the output where possible.
 - Duplicate `skus` or duplicate `product_ids` are rejected before API calls.
 - Ambiguous SKU matches are row failures with `stage: "resolve"`.
 - Missing SKU or missing product ID is a row failure with `stage: "resolve"` or
   `stage: "fetch"` respectively.
+- SKU matching is exact according to Plytix API filter semantics. The implementation does
+  not perform local case folding, trimming, or normalization.
 - No related entity expansion in v1. Product rows only; assets, categories, variants, and
   relationships remain separate tools.
 
@@ -96,11 +100,21 @@ Rules:
 - `attributes` follows existing `products_search` behavior, max 50. Custom attributes need
   the `attributes.` prefix when Plytix requires it. It is supported for `mode: "search"`
   and `mode: "skus"`.
+- Duplicate `attributes` are rejected before API calls. The canonical query hash stores
+  attributes as sorted unique values because projection order is not semantically
+  meaningful.
 - `mode: "product_ids"` rejects `attributes` in v1 because `GET /api/v2/products/:id`
   returns the full product and does not support server-side projection.
+- `mode: "product_ids"` rejects `page_size` because pagination does not apply to direct
+  product fetches.
 - `page_size` defaults to 100 and may not exceed 100.
 - `preview_rows` defaults to 5 and may not exceed 20.
-- Inline `mode: "search"` defaults `max_rows` to the inline row cap.
+- Inline `mode: "search"` treats explicit `max_rows <= inline_cap` as an intentional
+  limited read and may return `truncated: true`.
+- Inline `mode: "search"` with omitted `max_rows` means "small full interactive read". It
+  defaults to the inline row cap and rejects if more rows match than the cap.
+- For `mode: "skus"` and `mode: "product_ids"`, `max_rows` defaults to the identifier
+  count. If provided and lower than the identifier count, reject before API calls.
 - File `mode: "search"` requires explicit `max_rows`, even with filters. This prevents
   accidental full-catalog dumps.
 - `confirm_full_catalog: true` only permits an empty-filter search. It does not remove
@@ -143,12 +157,21 @@ ProductBatchExportInput & {
 Rules:
 
 - Stdio-only.
-- Default format is `jsonl`.
-- Require `.jsonl` or `.ndjson` extension.
+- Require `PLYTIX_MCP_EXPORT_DIR`. File export writes only under this configured export
+  root.
+- `output_path` may be relative to the export root or absolute, but the resolved real
+  parent path must be inside the resolved export root.
+- Reject `..` path segments and any resolved path or symlinked parent that escapes the
+  export root.
+- Parent directory must already exist inside the export root.
+- Default format is inferred from the extension.
+- Require `.jsonl` or `.ndjson` extension. If `format` is provided, it must match the
+  extension.
 - Write UTF-8 only.
-- Parent directory must already exist.
 - Do not overwrite an existing file unless `overwrite: true`.
-- Write to a temporary file in the same directory, then atomically rename into place.
+- Write to an exclusively created temporary file in the same resolved parent directory,
+  then atomically rename into place.
+- Clean up the temporary file on failure.
 - Hard cap file exports at **100,000 rows** and **256 MB** output bytes.
 - Never echo row payloads in errors. Return counts, keys, paths, and error messages only.
 - Return a small `preview` array from the first `preview_rows` products, subject to the
@@ -156,10 +179,31 @@ Rules:
 
 Output file format:
 
-- One product JSON object per line.
+- One canonical product JSON object per line.
 - No metadata header line. Keep the file directly streamable into diff tools, `jq`, or
   ETL readers.
 - The returned `export_sha256` is the SHA-256 of the exact file bytes.
+
+## Canonical JSON
+
+All query and export hashes use canonical JSON:
+
+- UTF-8.
+- Object keys sorted lexicographically at every depth.
+- Array order preserved.
+- Undefined object fields omitted.
+- No insignificant whitespace.
+- Strings use standard JSON escaping.
+- Numbers follow `JSON.stringify`-compatible finite JSON number rules.
+- Reject `NaN`, `Infinity`, and `-Infinity`.
+
+Canonical JSONL:
+
+- Each row is one canonical JSON object.
+- Each row is followed by `\n`, including the final row.
+- `export_sha256` is computed over those exact bytes.
+- File export writes canonical JSONL too, so inline and file hashes do not drift because
+  of object insertion order or pretty-printing differences.
 
 ## Hashes
 
@@ -184,9 +228,11 @@ Rejected:
   status: "rejected",
   summary: {
     requested?: number,
+    matched?: number,
     exported: 0,
     failed: number,
-    truncated: boolean
+    truncated: boolean,
+    limit_reason?: ProductBatchExportLimitReason
   },
   failures: ProductBatchExportFailure[],
   metadata?: ProductBatchExportMetadata
@@ -203,13 +249,26 @@ Finished:
   preview: PlytixProduct[],
   summary: {
     requested?: number,
+    matched?: number,
     exported: number,
     failed: number,
-    truncated: boolean
+    truncated: boolean,
+    limit_reason?: ProductBatchExportLimitReason
   },
   failures: ProductBatchExportFailure[],
   metadata: ProductBatchExportMetadata
 }
+```
+
+Limit reason:
+
+```ts
+type ProductBatchExportLimitReason =
+  | "max_rows"
+  | "file_byte_cap"
+  | "inline_row_cap"
+  | "inline_byte_cap"
+  | "api_window_limit";
 ```
 
 Failure:
@@ -236,9 +295,15 @@ interface ProductBatchExportMetadata {
   completed_at: string;
   query_sha256?: string;
   export_sha256?: string;
-  attributes_returned?: string[];
+  attributes_requested?: string[];
+  attributes_returned_observed?: string[];
+  format?: "jsonl" | "ndjson";
 }
 ```
+
+`summary.requested` is the input identifier count for `skus` and `product_ids`. For
+search mode, `summary.matched` is the Plytix total match count only when the API provides
+it; do not invent one.
 
 ## Mechanism
 
@@ -262,9 +327,13 @@ interface ProductBatchExportMetadata {
 1. Reject duplicate SKUs.
 2. Resolve SKUs in chunks of 100 with exact `sku in [...]`, no `pagination.order`, and
    page through every chunk until `pagination.pages` is exhausted.
-3. Missing SKU becomes a `resolve` failure.
-4. Multiple products for the same SKU becomes a `resolve` failure.
-5. Export resolved products in input order.
+3. Always request enough internal fields to identify `product_id` and `sku`, even when
+   the caller did not request them. Internal resolver fields may be used for matching,
+   ordering, and failure detection; do not inject them into custom attributes unless the
+   caller requested them.
+4. Missing SKU becomes a `resolve` failure.
+5. Multiple products for the same SKU becomes a `resolve` failure.
+6. Export resolved products in input order.
 
 ### Product ID mode
 
@@ -273,6 +342,21 @@ interface ProductBatchExportMetadata {
    request pacing.
 3. Missing or failed fetch becomes a row failure.
 4. Export fetched products in input order.
+
+## Failure Semantics
+
+| Scenario | Status | Final file? | Notes |
+|---|---|---|---|
+| Validation failure | `rejected` | No | No API calls. |
+| Inline cap exceeded | `rejected` | No | No row payloads. |
+| File write failure | `rejected` | No | Temp file is cleaned up. |
+| SKU missing/ambiguous | `finished` | Yes | Export successes only and report per-SKU failures. |
+| Product ID missing/fetch failed | `finished` | Yes | Export successes only and report per-product failures. |
+| Search page fetch failure after retries | `rejected` | No | Partial search output is unsafe for diff workflows. |
+| Search hits `max_rows` or file byte cap | `finished` | Yes | `truncated: true` with `limit_reason`. |
+
+Deterministic `skus` and `product_ids` exports should reject instead of returning partial
+output when the selector itself exceeds row caps or when file bytes exceed the hard cap.
 
 ## Pacing and Retries
 

@@ -177,6 +177,105 @@ export type BatchUpdateResult =
       metadata?: BatchUpdateMetadata;
     };
 
+// ─────────────────────────────────────────────────────────────
+// Batch Product Exports
+// ─────────────────────────────────────────────────────────────
+
+export type ProductExportMode = 'search' | 'skus' | 'product_ids';
+
+export type ProductExportSelector =
+  | {
+      mode: 'search';
+      filters?: unknown[] | null;
+      sort?: unknown;
+      confirm_full_catalog?: boolean;
+    }
+  | {
+      mode: 'skus';
+      skus: string[];
+    }
+  | {
+      mode: 'product_ids';
+      product_ids: string[];
+    };
+
+export type ProductBatchExportInput = ProductExportSelector & {
+  attributes?: string[];
+  max_rows?: number;
+  page_size?: number;
+  preview_rows?: number;
+};
+
+export type ProductBatchExportFormat = 'jsonl' | 'ndjson';
+
+export type ProductBatchExportToFileInput = ProductBatchExportInput & {
+  output_path: string;
+  format?: ProductBatchExportFormat;
+  overwrite?: boolean;
+};
+
+export type ProductBatchExportLimitReason =
+  | 'max_rows'
+  | 'file_byte_cap'
+  | 'inline_row_cap'
+  | 'inline_byte_cap'
+  | 'api_window_limit';
+
+export type ProductBatchExportFailureStage =
+  | 'validation'
+  | 'resolve'
+  | 'fetch'
+  | 'write'
+  | 'limit';
+
+export interface ProductBatchExportFailure {
+  key: string;
+  index?: number;
+  stage: ProductBatchExportFailureStage;
+  errors: BatchUpdateErrorDetail[];
+}
+
+export interface ProductBatchExportSummary {
+  requested?: number;
+  matched?: number;
+  exported: number;
+  failed: number;
+  truncated: boolean;
+  limit_reason?: ProductBatchExportLimitReason;
+}
+
+export interface ProductBatchExportMetadata {
+  selector_mode: ProductExportMode;
+  output_path?: string;
+  row_count: number;
+  page_size: number;
+  pages_read?: number;
+  started_at: string;
+  completed_at: string;
+  query_sha256?: string;
+  export_sha256?: string;
+  attributes_requested?: string[];
+  attributes_returned_observed?: string[];
+  format?: ProductBatchExportFormat;
+}
+
+export type ProductBatchExportResult =
+  | {
+      status: 'rejected';
+      summary: ProductBatchExportSummary;
+      failures: ProductBatchExportFailure[];
+      metadata?: ProductBatchExportMetadata;
+    }
+  | {
+      status: 'finished';
+      mode: 'inline' | 'file';
+      products?: PlytixProduct[];
+      preview: PlytixProduct[];
+      summary: ProductBatchExportSummary;
+      failures: ProductBatchExportFailure[];
+      metadata: ProductBatchExportMetadata;
+    };
+
 export interface PlytixRelationship {
   relationship_id: string;
   relationship_label: string;

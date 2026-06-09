@@ -8,7 +8,11 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
-import type { PlytixProduct } from '../types.js';
+import type {
+  PlytixProduct,
+  ProductBatchExportInput,
+  ProductBatchExportToFileInput,
+} from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
 import type { IdentifierType } from '../lookup/identifier.js';
@@ -18,6 +22,10 @@ import {
   STDIO_INLINE_MAX_ITEMS,
 } from '../batch/helpers.js';
 import { readBatchManifest } from '../batch/manifest.js';
+import {
+  STDIO_EXPORT_INLINE_MAX_BYTES,
+  STDIO_EXPORT_INLINE_MAX_ROWS,
+} from '../batch/export.js';
 
 const batchUpdateItemSchema = z.object({
   sku: z.string().min(1).optional(),
@@ -28,6 +36,32 @@ const batchUpdateItemSchema = z.object({
   expected_attributes: z.record(z.unknown()).optional(),
   if_match: z.record(z.unknown()).optional(),
 });
+
+const batchExportShape = {
+  mode: z.enum(['search', 'skus', 'product_ids']).describe('Export selector mode'),
+  filters: z
+    .array(z.any())
+    .nullable()
+    .optional()
+    .describe('Search filters for mode: search'),
+  sort: z.any().optional().describe('Sort payload for mode: search'),
+  confirm_full_catalog: z
+    .boolean()
+    .optional()
+    .describe('Required for empty-filter search exports'),
+  skus: z.array(z.string().min(1)).optional().describe('Exact SKUs for mode: skus'),
+  product_ids: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('Product IDs for mode: product_ids'),
+  attributes: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('Attributes to project for search/skus mode (max 50)'),
+  max_rows: z.number().int().positive().optional().describe('Maximum rows to export'),
+  page_size: z.number().int().positive().max(100).optional().describe('Search page size'),
+  preview_rows: z.number().int().positive().max(20).optional().describe('Preview row count'),
+};
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
   // Create lookup instance for smart search
@@ -320,6 +354,85 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
             {
               type: 'text',
               text: `Error searching products: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_export - Small inline product export
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<ProductBatchExportInput & Record<string, unknown>>(
+    server,
+    'products_batch_export',
+    {
+      title: 'Batch Export Products',
+      description:
+        `Export a small product snapshot inline by search, SKU list, or product ID list ` +
+        `(max ${STDIO_EXPORT_INLINE_MAX_ROWS} rows and ${STDIO_EXPORT_INLINE_MAX_BYTES} serialized bytes).`,
+      inputSchema: batchExportShape,
+    },
+    async (args) => {
+      try {
+        const result = await client.batchExportProducts(args as ProductBatchExportInput);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error running batch export: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_export_to_file - Stdio-only product export
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<ProductBatchExportToFileInput & Record<string, unknown>>(
+    server,
+    'products_batch_export_to_file',
+    {
+      title: 'Batch Export Products To File',
+      description:
+        'Write a product snapshot to JSONL/NDJSON under PLYTIX_MCP_EXPORT_DIR without returning all rows through the model context.',
+      inputSchema: {
+        ...batchExportShape,
+        output_path: z
+          .string()
+          .min(1)
+          .describe('Export path relative to PLYTIX_MCP_EXPORT_DIR, or absolute inside it'),
+        format: z.enum(['jsonl', 'ndjson']).optional().describe('Must match output_path extension'),
+        overwrite: z.boolean().optional().describe('Replace output_path if it already exists'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await client.batchExportProductsToFile(args as ProductBatchExportToFileInput);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error writing batch export: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
           isError: true,

@@ -27,6 +27,9 @@ import type {
   RateLimitInfo,
   BatchUpdateMetadata,
   BatchUpdateResult,
+  ProductBatchExportInput,
+  ProductBatchExportResult,
+  ProductBatchExportToFileInput,
 } from './types.js';
 import { PlytixError } from './types.js';
 import {
@@ -38,6 +41,13 @@ import {
   type ExecuteBatchUpdateOptions,
   type ResolvedProductRef,
 } from './batch/runner.js';
+import {
+  STDIO_EXPORT_INLINE_MAX_BYTES,
+  STDIO_EXPORT_INLINE_MAX_ROWS,
+  executeBatchExport,
+  type ExecuteBatchExportOptions,
+} from './batch/export.js';
+import { exportProductsToFile } from './batch/export-file.js';
 
 const DEFAULT_CONFIG = {
   baseUrl: 'https://pim.plytix.com',
@@ -285,6 +295,26 @@ export class PlytixClient {
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
     });
+  }
+
+  async batchExportProducts(
+    input: ProductBatchExportInput,
+    options: Partial<ExecuteBatchExportOptions> = {}
+  ): Promise<ProductBatchExportResult> {
+    return executeBatchExport(this, input, {
+      mode: 'inline',
+      maxRows: options.maxRows ?? STDIO_EXPORT_INLINE_MAX_ROWS,
+      maxResponseBytes: options.maxResponseBytes ?? STDIO_EXPORT_INLINE_MAX_BYTES,
+      concurrency: options.concurrency,
+      requestDelayMs: options.requestDelayMs,
+      metadata: options.metadata,
+    });
+  }
+
+  async batchExportProductsToFile(
+    input: ProductBatchExportToFileInput
+  ): Promise<ProductBatchExportResult> {
+    return exportProductsToFile(this, input);
   }
 
   async getProduct(id: string): Promise<PlytixResult<PlytixProduct>> {
