@@ -15,6 +15,10 @@ import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
+import {
+  WORKER_EXPORT_INLINE_MAX_BYTES,
+  WORKER_EXPORT_INLINE_MAX_ROWS,
+} from './batch/export.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -368,6 +372,61 @@ const TOOLS: ToolDefinition[] = [
           description: 'Sorting options',
         },
       },
+    },
+  },
+  {
+    name: 'products_batch_export',
+    description:
+      `Export a small product snapshot inline by search, SKU list, or product ID list ` +
+      `(max ${WORKER_EXPORT_INLINE_MAX_ROWS} rows and ${WORKER_EXPORT_INLINE_MAX_BYTES} serialized bytes).`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['search', 'skus', 'product_ids'],
+          description: 'Export selector mode',
+        },
+        filters: {
+          type: 'array',
+          description: 'Search filters for mode: search',
+        },
+        sort: {
+          description: 'Sort payload for mode: search',
+        },
+        confirm_full_catalog: {
+          type: 'boolean',
+          description: 'Required for empty-filter search exports',
+        },
+        skus: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Exact SKUs for mode: skus',
+        },
+        product_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Product IDs for mode: product_ids',
+        },
+        attributes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Attributes to project for search/skus mode (max 50)',
+        },
+        max_rows: {
+          type: 'number',
+          description: 'Maximum rows to export',
+        },
+        page_size: {
+          type: 'number',
+          description: 'Search page size (max 100)',
+        },
+        preview_rows: {
+          type: 'number',
+          description: 'Preview row count (max 20)',
+        },
+      },
+      required: ['mode'],
     },
   },
   {
@@ -1137,6 +1196,17 @@ const toolHandlers: Record<string, ToolHandler> = {
           ),
         },
       ],
+    };
+  },
+
+  async products_batch_export(args, client) {
+    const result = await client.batchExportProducts(
+      args as Parameters<typeof client.batchExportProducts>[0]
+    );
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      ...(result.status === 'rejected' ? { isError: true } : {}),
     };
   },
 

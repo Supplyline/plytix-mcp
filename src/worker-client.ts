@@ -26,6 +26,8 @@ import type {
   RateLimitInfo,
   BatchUpdateMetadata,
   BatchUpdateResult,
+  ProductBatchExportInput,
+  ProductBatchExportResult,
 } from './types.js';
 import { PlytixError } from './types.js';
 import {
@@ -37,6 +39,12 @@ import {
   type ExecuteBatchUpdateOptions,
   type ResolvedProductRef,
 } from './batch/runner.js';
+import {
+  WORKER_EXPORT_INLINE_MAX_BYTES,
+  WORKER_EXPORT_INLINE_MAX_ROWS,
+  executeBatchExport,
+  type ExecuteBatchExportOptions,
+} from './batch/export.js';
 
 const DEFAULT_CONFIG = {
   baseUrl: 'https://pim.plytix.com',
@@ -353,6 +361,20 @@ export class WorkerPlytixClient {
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
+    });
+  }
+
+  async batchExportProducts(
+    input: ProductBatchExportInput,
+    options: Partial<ExecuteBatchExportOptions> = {}
+  ): Promise<ProductBatchExportResult> {
+    return executeBatchExport(this, input, {
+      mode: 'inline',
+      maxRows: options.maxRows ?? WORKER_EXPORT_INLINE_MAX_ROWS,
+      maxResponseBytes: options.maxResponseBytes ?? WORKER_EXPORT_INLINE_MAX_BYTES,
+      concurrency: options.concurrency,
+      requestDelayMs: options.requestDelayMs,
+      metadata: options.metadata,
     });
   }
 

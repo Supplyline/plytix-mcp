@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-06-09
+
+### Added
+- Added `products_batch_export` for capped inline product snapshots by search, SKU, or
+  product ID, available on stdio and the Worker.
+- Added stdio-only `products_batch_export_to_file` for larger JSONL/NDJSON exports under
+  `PLYTIX_MCP_EXPORT_DIR`, with canonical hashes, preview rows, path guardrails, and
+  per-row failures.
+
+### Changed
+- Documented the batch-export contract and Worker parity exception for local filesystem
+  exports.
+
 ## [0.3.1] - 2026-06-09
 
 ### Added

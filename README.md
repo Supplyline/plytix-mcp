@@ -6,7 +6,7 @@ A **lightweight, stateless Model Context Protocol (MCP) server** that provides A
 
 ## Features
 
-- **47 MCP tools via stdio and 44 via the remote worker**
+- **51 MCP tools via stdio and 46 via the remote worker**
 - **Smart product lookup** with automatic identifier detection (SKU, MPN, GTIN, label)
 - **Family & inheritance tracking** with overwritten_attributes support
 - **Schema discovery** for attributes and search filters
@@ -98,7 +98,7 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
-The remote worker exposes 44 tools. It intentionally omits the three local-only identifier utilities: `identifier_detect`, `identifier_normalize`, and `match_score`.
+The remote worker exposes 46 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
 ### Local Development
 
@@ -120,8 +120,12 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `products_get_full` | Get one product with related family, variants, categories, and assets |
 | `products_search` | Advanced search with filters, pagination, and sorting |
 | `products_find` | Simple multi-criteria search (SKU, MPN, MNO, GTIN, label, fuzzy) |
+| `products_batch_export` | Capped inline product snapshot by search, SKU, or product ID |
+| `products_batch_export_to_file` | Stdio-only JSONL/NDJSON product export under `PLYTIX_MCP_EXPORT_DIR` |
 | `products_create` | Create a new product |
 | `products_update` | Partial update to product fields/attributes |
+| `products_batch_update` | Apply a small guarded product-update batch |
+| `products_batch_update_manifest` | Stdio-only guarded product updates from a local JSON manifest |
 | `products_assign_family` | Assign or unassign a product family |
 | `products_set_attribute` | Atomic set of one attribute value |
 | `products_clear_attribute` | Atomic clear of one attribute value |
@@ -198,7 +202,7 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `identifier_normalize` | Normalize identifier for matching |
 | `match_score` | Score identifier-product match confidence |
 
-The remote worker exposes every tool above except the three identifier utilities in the final section.
+The remote worker exposes every tool above except the three identifier utilities in the final section and the two stdio-only filesystem tools: `products_batch_update_manifest` and `products_batch_export_to_file`.
 
 ## Smart Lookup System
 
@@ -245,6 +249,7 @@ Products return an `overwritten_attributes` array listing which attributes are e
 | `PLYTIX_AUTH_URL` | ❌ | `https://auth.plytix.com/auth/api/get-token` | Auth endpoint |
 | `PLYTIX_MPN_LABELS` | ❌ | `["attributes.mpn"]` | JSON array of MPN attribute labels |
 | `PLYTIX_MNO_LABELS` | ❌ | `["attributes.model_no"]` | JSON array of MNO attribute labels |
+| `PLYTIX_MCP_EXPORT_DIR` | ❌ | — | Required only for `products_batch_export_to_file`; limits file exports to this directory |
 
 ## Development
 

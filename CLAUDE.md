@@ -29,6 +29,7 @@ src/
   worker-client.ts      # Request-scoped Plytix client for the Cloudflare Worker
   types.ts              # TypeScript types for Plytix API
   worker.ts             # Cloudflare Worker MCP entry point
+  batch/                # Shared batch update/export runners and stdio-only file helpers
   lookup/
     identifier.ts       # Identifier type detection (ID, SKU, MPN, GTIN, label)
     lookup.ts           # Smart product lookup with staged search
@@ -56,6 +57,8 @@ src/
 | `products_get` | Get a single product by ID (includes `overwritten_attributes`) |
 | `products_search` | Advanced product search with filters, pagination, and sorting |
 | `products_find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
+| `products_batch_export` | Capped inline product export by search, SKU, or product ID |
+| `products_batch_export_to_file` | Stdio-only JSONL/NDJSON product export under `PLYTIX_MCP_EXPORT_DIR` |
 | `families_list` | List or search product families |
 | `families_get` | Get one product family |
 | `families_list_attributes` | List attributes directly linked to a family |
@@ -150,6 +153,8 @@ Optional:
 - `PLYTIX_AUTH_URL` - Auth endpoint (default: https://auth.plytix.com/auth/api/get-token)
 - `PLYTIX_MPN_LABELS` - JSON array of MPN attribute labels
 - `PLYTIX_MNO_LABELS` - JSON array of MNO attribute labels
+- `PLYTIX_MCP_EXPORT_DIR` - Required only for stdio `products_batch_export_to_file`;
+  file exports are restricted to this directory
 
 ## Plytix API Notes
 
