@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-09
+
+### Changed
+- Batch update guards: an expected `null` in `expected_attributes` / `if_match` now matches a live
+  value that is `null` **or absent** (nullish equivalence). JSON cannot express `undefined`, so
+  `null` is the only way a manifest can assert "this attribute is currently empty" — required for
+  fill-in-the-blanks (gap-fill) callers. A present empty string still does not match `null`.
+
 ## [0.3.2] - 2026-06-09
 
 ### Added

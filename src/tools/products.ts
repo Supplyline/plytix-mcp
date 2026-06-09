@@ -701,7 +701,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_batch_update',
     {
       title: 'Batch Update Products',
-      description: 'Update a small batch of products by product_id or sku using documented product PATCH operations.',
+      description: 'Update a small batch of products by product_id or sku using documented product PATCH operations. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
       inputSchema: {
         items: z
           .array(batchUpdateItemSchema)
@@ -756,7 +756,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_batch_update_manifest',
     {
       title: 'Batch Update Products From Manifest',
-      description: 'Read a local JSON manifest and update products without sending large payloads through the model context.',
+      description: 'Read a local JSON manifest and update products without sending large payloads through the model context. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
       inputSchema: {
         manifest_path: z.string().min(1).describe('Path to a schema_version: 1 JSON manifest'),
         dry_run: z

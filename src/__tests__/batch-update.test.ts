@@ -351,6 +351,96 @@ describe('executeBatchUpdate', () => {
     ]);
     expect(ops.getProduct).not.toHaveBeenCalled();
   });
+
+  it('expected null matches an ABSENT live attribute (nullish equivalence)', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: {} } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    expect(result.status).toBe('finished');
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(ops.updateProduct).toHaveBeenCalled();
+  });
+
+  it('expected null matches a live null attribute', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: { opt_1: null } } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+  });
+
+  it('expected null CONFLICTS with a present empty string', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: { opt_1: '' } } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 1 });
+    expect(result.failures[0]).toMatchObject({ stage: 'conflict' });
+    expect(result.failures[0]?.errors?.[0]?.field).toBe('expected_attributes.opt_1');
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('expected null CONFLICTS with a present live value', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: { opt_1: 'someone wrote this' } } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    expect(result.failures[0]).toMatchObject({ stage: 'conflict' });
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('if_match attribute paths get the same nullish equivalence', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: {} } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, if_match: { 'attributes.opt_1': null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+  });
+
+  it('dry-run with a null guard passes when the attribute is absent', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: {} } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, dryRun: true, requestDelayMs: 0 }
+    );
+    expect(result).toMatchObject({
+      status: 'finished',
+      dry_run: true,
+      summary: { total: 1, succeeded: 0, failed: 0, skipped: 1 },
+    });
+    expect(result.failures).toEqual([]);
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
 });
 
 describe('SKU resolution pagination', () => {

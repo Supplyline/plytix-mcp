@@ -679,7 +679,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_batch_update',
-    description: 'Update a small batch of products by product_id or sku using documented product PATCH operations.',
+    description: 'Update a small batch of products by product_id or sku using documented product PATCH operations. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -699,7 +699,7 @@ const TOOLS: ToolDefinition[] = [
               },
               expected_attributes: {
                 type: 'object',
-                description: 'Attribute values that must still match live product data before PATCH',
+                description: 'Attribute values that must still match live product data before PATCH. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
               },
               if_match: {
                 type: 'object',
