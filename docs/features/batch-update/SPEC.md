@@ -83,6 +83,12 @@ Validation before any write:
   `expected_attributes` compares keys inside `product.attributes`; `if_match` compares
   top-level fields or `attributes.<label>` paths.
 
+**Null semantics (v0.3.3).** JSON cannot express `undefined`, so a guard value of `null` means
+"expect empty": it matches a live attribute that is `null` or absent. A present empty string is a
+value and does not match. Nullish equivalence applies only at the top level of the guard object —
+nested nulls compare strictly. This is the standard precondition for fill-in-the-blanks consumers
+(read empty → write) and applies to both `expected_attributes` and `if_match` paths.
+
 If any item is structurally invalid, reject the whole call and return the offending
 indices. Do not partially apply a structurally invalid batch.
 
