@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented the batch-update implementation plan, REST evidence gate, and Worker parity
   exception for the stdio-only manifest tool.
 
+### Fixed
+- SKU resolution now pages through all search result pages before verification, so duplicate
+  SKU matches cannot hide behind page 1 during batch updates.
+
 ## [0.2.2] - 2026-05-31
 
 Follow-up fixes from post-merge code review. No breaking changes.

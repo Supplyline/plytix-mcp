@@ -3,17 +3,44 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import worker from '../worker.js';
+import { PlytixClient } from '../client.js';
+import { WorkerPlytixClient } from '../worker-client.js';
 import { readBatchManifest } from '../batch/manifest.js';
 import { executeBatchUpdate, type BatchUpdateOperations } from '../batch/runner.js';
 import {
   STDIO_INLINE_MAX_BYTES,
   validateBatchItems,
 } from '../batch/helpers.js';
-import { PlytixError, type PlytixProduct, type PlytixResult } from '../types.js';
+import {
+  PlytixError,
+  type PlytixProduct,
+  type PlytixResult,
+  type PlytixSearchBody,
+} from '../types.js';
 
 const productResult = (id: string): PlytixResult<PlytixProduct> => ({
   data: [{ id, modified: '2026-06-09T00:00:00Z' }],
 });
+
+const skuResolutionPage = (page: number): PlytixResult<PlytixProduct> => {
+  if (page === 1) {
+    return {
+      data: [
+        ...Array.from({ length: 99 }, (_, index) => ({
+          id: `product-${index + 1}`,
+          sku: `SKU${index + 1}`,
+        })),
+        { id: 'dup-product-1', sku: 'DUP-SKU' },
+      ],
+      pagination: { page: 1, page_size: 100, total: 101, pages: 2 },
+    };
+  }
+
+  return {
+    data: [{ id: 'dup-product-2', sku: 'DUP-SKU' }],
+    pagination: { page: 2, page_size: 100, total: 101, pages: 2 },
+  };
+};
 
 function makeOps(args?: {
   resolved?: Record<string, Array<{ id: string; sku?: string }>>;
@@ -185,6 +212,44 @@ describe('executeBatchUpdate', () => {
       field: 'attributes.google_detail',
       msg: 'too long',
     });
+  });
+});
+
+describe('SKU resolution pagination', () => {
+  const skus = ['DUP-SKU', ...Array.from({ length: 99 }, (_, index) => `SKU${index + 1}`)];
+
+  it('stdio client pages through all SKU matches before verification', async () => {
+    const client = new PlytixClient({ apiKey: 'key', apiPassword: 'password' });
+    const searchProducts = vi.fn(async (body: PlytixSearchBody) =>
+      skuResolutionPage(body.pagination?.page ?? 1)
+    );
+    client.searchProducts = searchProducts as typeof client.searchProducts;
+
+    const resolved = await client.resolveProductIdsBySku(skus);
+
+    expect(searchProducts).toHaveBeenCalledTimes(2);
+    expect(searchProducts.mock.calls.map(([body]) => body.pagination?.page)).toEqual([1, 2]);
+    expect(resolved.get('DUP-SKU')?.map((product) => product.id)).toEqual([
+      'dup-product-1',
+      'dup-product-2',
+    ]);
+  });
+
+  it('Worker client pages through all SKU matches before verification', async () => {
+    const client = new WorkerPlytixClient({ apiKey: 'key', apiPassword: 'password' });
+    const searchProducts = vi.fn(async (body: PlytixSearchBody) =>
+      skuResolutionPage(body.pagination?.page ?? 1)
+    );
+    client.searchProducts = searchProducts as typeof client.searchProducts;
+
+    const resolved = await client.resolveProductIdsBySku(skus);
+
+    expect(searchProducts).toHaveBeenCalledTimes(2);
+    expect(searchProducts.mock.calls.map(([body]) => body.pagination?.page)).toEqual([1, 2]);
+    expect(resolved.get('DUP-SKU')?.map((product) => product.id)).toEqual([
+      'dup-product-1',
+      'dup-product-2',
+    ]);
   });
 });
 

@@ -62,6 +62,7 @@
    - use no `pagination.order`,
    - keep `page_size <= 100`,
    - chunk SKU searches to stay within page-size limits,
+   - page through every chunk until `pagination.pages` is exhausted,
    - fail unresolved or ambiguous SKUs per row.
 2. Add `batchUpdateProducts(items, options?)`:
    - validate inputs,

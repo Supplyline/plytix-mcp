@@ -308,23 +308,31 @@ export class WorkerPlytixClient {
   async resolveProductIdsBySku(skus: string[]): Promise<Map<string, ResolvedProductRef[]>> {
     const resolved = new Map<string, ResolvedProductRef[]>();
     const uniqueSkus = Array.from(new Set(skus.filter(Boolean)));
-    const chunkSize = 100;
+    const pageSize = 100;
 
-    for (let i = 0; i < uniqueSkus.length; i += chunkSize) {
-      const batch = uniqueSkus.slice(i, i + chunkSize);
-      const result = await this.searchProducts({
-        filters: [[{ field: 'sku', operator: 'in', value: batch }]],
-        attributes: ['sku'],
-        pagination: { page: 1, page_size: 100 },
-      });
+    for (let i = 0; i < uniqueSkus.length; i += pageSize) {
+      const batch = uniqueSkus.slice(i, i + pageSize);
+      let page = 1;
+      let totalPages = 1;
 
-      for (const product of result.data ?? []) {
-        if (!product.sku) continue;
-        resolved.set(product.sku, [
-          ...(resolved.get(product.sku) ?? []),
-          { id: product.id, sku: product.sku },
-        ]);
-      }
+      do {
+        const result = await this.searchProducts({
+          filters: [[{ field: 'sku', operator: 'in', value: batch }]],
+          attributes: ['sku'],
+          pagination: { page, page_size: pageSize },
+        });
+
+        for (const product of result.data ?? []) {
+          if (!product.sku) continue;
+          resolved.set(product.sku, [
+            ...(resolved.get(product.sku) ?? []),
+            { id: product.id, sku: product.sku },
+          ]);
+        }
+
+        totalPages = Math.max(result.pagination?.pages ?? 1, 1);
+        page += 1;
+      } while (page <= totalPages);
     }
 
     return resolved;

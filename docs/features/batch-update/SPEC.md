@@ -165,7 +165,8 @@ Primary v1 implementation uses documented product APIs from
 
 1. Validate all items.
 2. Resolve missing `product_id` values by exact SKU search:
-   `POST /api/v2/products/search`.
+   `POST /api/v2/products/search`, with no `pagination.order`, `page_size <= 100`,
+   and paging through each chunk until `pagination.pages` is exhausted.
 3. PATCH each product with bounded concurrency:
    `PATCH /api/v2/products/:product_id`.
 4. Reuse existing auth, timeout, 401 retry, and 429 backoff in `client.ts` and
