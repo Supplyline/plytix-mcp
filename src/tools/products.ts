@@ -25,6 +25,8 @@ const batchUpdateItemSchema = z.object({
   label: z.string().optional(),
   status: z.string().optional(),
   attributes: z.record(z.unknown()).optional(),
+  expected_attributes: z.record(z.unknown()).optional(),
+  if_match: z.record(z.unknown()).optional(),
 });
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
@@ -580,6 +582,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   registerTool<{
     items: unknown[];
     dry_run?: boolean;
+    return_successes?: boolean;
   }>(
     server,
     'products_batch_update',
@@ -594,12 +597,17 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .boolean()
           .optional()
           .describe('Validate, resolve, and verify the batch without applying PATCH updates'),
+        return_successes: z
+          .boolean()
+          .optional()
+          .describe('Include one success row per patched product for exact caller ledger updates'),
       },
     },
-    async ({ items, dry_run }) => {
+    async ({ items, dry_run, return_successes }) => {
       try {
         const result = await client.batchUpdateProducts(items, {
           dryRun: dry_run === true,
+          returnSuccesses: return_successes === true,
           maxItems: STDIO_INLINE_MAX_ITEMS,
           maxBytes: STDIO_INLINE_MAX_BYTES,
         });
@@ -629,6 +637,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   registerTool<{
     manifest_path: string;
     dry_run?: boolean;
+    return_successes?: boolean;
   }>(
     server,
     'products_batch_update_manifest',
@@ -641,13 +650,18 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .boolean()
           .optional()
           .describe('Validate, resolve, and verify the manifest without applying PATCH updates'),
+        return_successes: z
+          .boolean()
+          .optional()
+          .describe('Include one success row per patched product for exact caller ledger updates'),
       },
     },
-    async ({ manifest_path, dry_run }) => {
+    async ({ manifest_path, dry_run, return_successes }) => {
       try {
         const manifest = await readBatchManifest(manifest_path);
         const result = await client.batchUpdateProducts(manifest.items, {
           dryRun: dry_run === true,
+          returnSuccesses: return_successes === true,
           maxItems: MANIFEST_MAX_ITEMS,
           metadata: manifest.metadata,
         });

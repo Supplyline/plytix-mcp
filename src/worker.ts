@@ -638,12 +638,24 @@ const TOOLS: ToolDefinition[] = [
                 type: 'object',
                 description: 'Attributes to update (use attribute labels as keys, null to clear)',
               },
+              expected_attributes: {
+                type: 'object',
+                description: 'Attribute values that must still match live product data before PATCH',
+              },
+              if_match: {
+                type: 'object',
+                description: 'Top-level or attributes.* field values that must match before PATCH',
+              },
             },
           },
         },
         dry_run: {
           type: 'boolean',
           description: 'Validate, resolve, and verify the batch without applying PATCH updates',
+        },
+        return_successes: {
+          type: 'boolean',
+          description: 'Include one success row per patched product for exact caller ledger updates',
         },
       },
       required: ['items'],
@@ -1723,6 +1735,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   async products_batch_update(args, client) {
     const result = await client.batchUpdateProducts(args.items, {
       dryRun: args.dry_run === true,
+      returnSuccesses: args.return_successes === true,
       maxItems: WORKER_INLINE_MAX_ITEMS,
       maxBytes: WORKER_INLINE_MAX_BYTES,
     });

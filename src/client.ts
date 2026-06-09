@@ -283,6 +283,7 @@ export class PlytixClient {
       metadata: options.metadata,
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
+      returnSuccesses: options.returnSuccesses,
     });
   }
 

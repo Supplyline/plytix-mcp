@@ -44,12 +44,23 @@ const skuResolutionPage = (page: number): PlytixResult<PlytixProduct> => {
 
 function makeOps(args?: {
   resolved?: Record<string, Array<{ id: string; sku?: string }>>;
+  live?: Record<string, PlytixProduct | undefined>;
+  get?: (productId: string) => Promise<PlytixResult<PlytixProduct>>;
   update?: (productId: string) => Promise<PlytixResult<PlytixProduct>>;
 }): BatchUpdateOperations & {
+  getProduct: ReturnType<typeof vi.fn>;
   resolveProductIdsBySku: ReturnType<typeof vi.fn>;
   updateProduct: ReturnType<typeof vi.fn>;
 } {
   return {
+    getProduct: vi.fn(async (productId: string) => {
+      if (args?.get) return args.get(productId);
+      const product = args?.live?.[productId] ?? {
+        id: productId,
+        modified: '2026-06-09T00:00:00Z',
+      };
+      return { data: product ? [product] : [] };
+    }),
     resolveProductIdsBySku: vi.fn(async (skus: string[]) => {
       const map = new Map<string, Array<{ id: string; sku?: string }>>();
       for (const sku of skus) {
@@ -116,6 +127,21 @@ describe('batch update validation', () => {
     );
 
     expect(result.failures[0]?.errors[0]?.msg).toContain('inline payload');
+  });
+
+  it('rejects empty or non-object optimistic guards', () => {
+    const result = validateBatchItems(
+      [
+        { product_id: '1', label: 'one', expected_attributes: {} },
+        { product_id: '2', label: 'two', if_match: [] },
+      ],
+      { maxItems: 250 }
+    );
+
+    expect(result.failures.map((failure) => failure.errors[0]?.field)).toEqual([
+      'expected_attributes',
+      'if_match',
+    ]);
   });
 });
 
@@ -212,6 +238,118 @@ describe('executeBatchUpdate', () => {
       field: 'attributes.google_detail',
       msg: 'too long',
     });
+  });
+
+  it('skips guarded rows whose live values drift before PATCH', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: {
+        'product-1': {
+          id: 'product-1',
+          sku: 'GUARDED',
+          status: 'ACTIVE',
+          attributes: { google_detail: 'changed' },
+        },
+      },
+    });
+
+    const result = await executeBatchUpdate(
+      ops,
+      [
+        {
+          sku: 'GUARDED',
+          attributes: { google_detail: 'new value' },
+          expected_attributes: { google_detail: 'original' },
+          if_match: { status: 'ACTIVE' },
+        },
+      ],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+
+    expect(result.status).toBe('finished');
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 1 });
+    expect(result.failures[0]).toMatchObject({
+      index: 0,
+      key: 'GUARDED',
+      product_id: 'product-1',
+      stage: 'conflict',
+    });
+    expect(result.failures[0]?.errors).toEqual([
+      {
+        field: 'expected_attributes.google_detail',
+        msg: 'live attribute no longer matches expected value',
+      },
+    ]);
+    expect(ops.getProduct).toHaveBeenCalledWith('product-1');
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('checks each guarded row immediately before its own PATCH', async () => {
+    const events: string[] = [];
+    const ops = makeOps({
+      get: async (productId) => {
+        events.push(`get:${productId}`);
+        return {
+          data: [
+            {
+              id: productId,
+              attributes: { google_detail: `${productId}:old` },
+            },
+          ],
+        };
+      },
+      update: async (productId) => {
+        events.push(`patch:${productId}`);
+        return productResult(productId);
+      },
+    });
+
+    const result = await executeBatchUpdate(
+      ops,
+      [
+        {
+          product_id: 'product-1',
+          attributes: { google_detail: 'one:new' },
+          expected_attributes: { google_detail: 'product-1:old' },
+        },
+        {
+          product_id: 'product-2',
+          attributes: { google_detail: 'two:new' },
+          expected_attributes: { google_detail: 'product-2:old' },
+        },
+      ],
+      { maxItems: 250, concurrency: 1, requestDelayMs: 0 }
+    );
+
+    expect(result.summary).toEqual({ total: 2, succeeded: 2, failed: 0, skipped: 0 });
+    expect(events).toEqual([
+      'get:product-1',
+      'patch:product-1',
+      'get:product-2',
+      'patch:product-2',
+    ]);
+  });
+
+  it('returns exact success rows when requested', async () => {
+    const ops = makeOps();
+
+    const result = await executeBatchUpdate(
+      ops,
+      [{ product_id: 'product-1', label: 'New label' }],
+      { maxItems: 250, returnSuccesses: true, requestDelayMs: 0 }
+    );
+
+    expect(result.status).toBe('finished');
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(result.successes).toEqual([
+      {
+        index: 0,
+        key: 'product-1',
+        product_id: 'product-1',
+        modified: '2026-06-09T00:00:00Z',
+      },
+    ]);
+    expect(ops.getProduct).not.toHaveBeenCalled();
   });
 });
 
