@@ -4,6 +4,7 @@ import type {
   BatchUpdateItem,
   BatchUpdateMetadata,
   BatchUpdateResult,
+  BatchUpdateSuccess,
 } from '../types.js';
 
 export const STDIO_INLINE_MAX_ITEMS = 250;
@@ -171,6 +172,46 @@ export function validateBatchItems(
       }
     }
 
+    if (item.expected_attributes !== undefined) {
+      if (!isPlainObject(item.expected_attributes)) {
+        failures.push(
+          makeFailure(
+            index,
+            item,
+            'validation',
+            'expected_attributes must be an object',
+            'expected_attributes'
+          )
+        );
+      } else if (Object.keys(item.expected_attributes).length === 0) {
+        failures.push(
+          makeFailure(
+            index,
+            item,
+            'validation',
+            'expected_attributes must not be empty',
+            'expected_attributes'
+          )
+        );
+      } else {
+        normalized.expected_attributes = item.expected_attributes;
+      }
+    }
+
+    if (item.if_match !== undefined) {
+      if (!isPlainObject(item.if_match)) {
+        failures.push(
+          makeFailure(index, item, 'validation', 'if_match must be an object', 'if_match')
+        );
+      } else if (Object.keys(item.if_match).length === 0) {
+        failures.push(
+          makeFailure(index, item, 'validation', 'if_match must not be empty', 'if_match')
+        );
+      } else {
+        normalized.if_match = item.if_match;
+      }
+    }
+
     const hasAttributes =
       normalized.attributes !== undefined && Object.keys(normalized.attributes).length > 0;
     if (
@@ -328,6 +369,7 @@ export function finishedResult(args: {
   failures: BatchUpdateFailure[];
   skipped: number;
   dryRun?: boolean;
+  successes?: BatchUpdateSuccess[];
   metadata?: BatchUpdateMetadata;
 }): BatchUpdateResult {
   return {
@@ -340,6 +382,7 @@ export function finishedResult(args: {
       skipped: args.skipped,
     },
     failures: args.failures,
+    ...(args.successes ? { successes: args.successes } : {}),
     ...(args.metadata ? { metadata: args.metadata } : {}),
   };
 }

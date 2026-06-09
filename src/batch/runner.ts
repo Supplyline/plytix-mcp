@@ -3,6 +3,7 @@ import type {
   BatchUpdateItem,
   BatchUpdateMetadata,
   BatchUpdateResult,
+  BatchUpdateSuccess,
   PlytixProduct,
   PlytixResult,
 } from '../types.js';
@@ -25,6 +26,7 @@ export interface ResolvedProductRef {
 }
 
 export interface BatchUpdateOperations {
+  getProduct(productId: string): Promise<PlytixResult<PlytixProduct>>;
   resolveProductIdsBySku(skus: string[]): Promise<Map<string, ResolvedProductRef[]>>;
   updateProduct(
     productId: string,
@@ -43,6 +45,7 @@ export interface ExecuteBatchUpdateOptions {
   metadata?: BatchUpdateMetadata;
   concurrency?: number;
   requestDelayMs?: number;
+  returnSuccesses?: boolean;
 }
 
 interface ReadyRow {
@@ -157,11 +160,28 @@ export async function executeBatchUpdate(
     return rejectedResult(total, [...failures, ...duplicateFailures], options.metadata);
   }
 
+  const guardRows = readyRows.filter((row) => row.item.expected_attributes || row.item.if_match);
+  const guardResults =
+    guardRows.length > 0
+      ? await runWithConcurrency(
+          guardRows,
+          {
+            concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
+            requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
+          },
+          (row) => checkRowGuard(ops, row)
+        )
+      : [];
+  const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
+  const conflictedIndices = new Set(guardFailures.map((failure) => failure.index));
+  const patchRows = readyRows.filter((row) => !conflictedIndices.has(row.index));
+  const prePatchFailures = [...failures, ...guardFailures];
+
   if (options.dryRun) {
     return finishedResult({
       total,
       succeeded: 0,
-      failures,
+      failures: prePatchFailures,
       skipped: total,
       dryRun: true,
       metadata: options.metadata,
@@ -169,7 +189,7 @@ export async function executeBatchUpdate(
   }
 
   const patchResults = await runWithConcurrency(
-    readyRows,
+    patchRows,
     {
       concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
       requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
@@ -177,23 +197,142 @@ export async function executeBatchUpdate(
     (row) => patchRowWithRetry(ops, row)
   );
 
-  const patchFailures = patchResults.filter(Boolean) as BatchUpdateFailure[];
-  const allFailures = [...failures, ...patchFailures];
+  const patchFailures = patchResults
+    .filter((result): result is { status: 'failure'; failure: BatchUpdateFailure } =>
+      result?.status === 'failure'
+    )
+    .map((result) => result.failure);
+  const successes = patchResults
+    .filter((result): result is { status: 'success'; success: BatchUpdateSuccess } =>
+      result?.status === 'success'
+    )
+    .map((result) => result.success);
+  const allFailures = [...prePatchFailures, ...patchFailures];
 
   return finishedResult({
     total,
-    succeeded: readyRows.length - patchFailures.length,
+    succeeded: patchRows.length - patchFailures.length,
     failures: allFailures,
-    skipped: failures.length,
+    skipped: prePatchFailures.length,
+    ...(options.returnSuccesses ? { successes } : {}),
     metadata: options.metadata,
   });
 }
+
+async function checkRowGuard(
+  ops: BatchUpdateOperations,
+  row: ReadyRow
+): Promise<BatchUpdateFailure | undefined> {
+  if (!row.item.expected_attributes && !row.item.if_match) {
+    return undefined;
+  }
+
+  let product: PlytixProduct | undefined;
+  try {
+    const result = await ops.getProduct(row.productId);
+    product = result.data?.[0];
+  } catch (error) {
+    return {
+      index: row.index,
+      key: row.key,
+      product_id: row.productId,
+      stage: 'conflict',
+      errors: parsePlytixErrors(error),
+    };
+  }
+
+  if (!product?.id) {
+    return {
+      index: row.index,
+      key: row.key,
+      product_id: row.productId,
+      stage: 'conflict',
+      errors: [{ msg: `Product guard check returned no product for ${row.productId}` }],
+    };
+  }
+
+  const errors = [
+    ...compareExpectedAttributes(product, row.item.expected_attributes),
+    ...compareIfMatch(product, row.item.if_match),
+  ];
+  if (errors.length === 0) return undefined;
+
+  return {
+    index: row.index,
+    key: row.key,
+    product_id: row.productId,
+    stage: 'conflict',
+    errors,
+  };
+}
+
+function compareExpectedAttributes(
+  product: PlytixProduct,
+  expected?: Record<string, unknown>
+): Array<{ field?: string; msg: string }> {
+  if (!expected) return [];
+
+  return Object.entries(expected)
+    .filter(([field, value]) => !valuesEqual(product.attributes?.[field], value))
+    .map(([field]) => ({
+      field: `expected_attributes.${field}`,
+      msg: 'live attribute no longer matches expected value',
+    }));
+}
+
+function compareIfMatch(
+  product: PlytixProduct,
+  expected?: Record<string, unknown>
+): Array<{ field?: string; msg: string }> {
+  if (!expected) return [];
+
+  return Object.entries(expected)
+    .filter(([field, value]) => !valuesEqual(readProductPath(product, field), value))
+    .map(([field]) => ({
+      field: `if_match.${field}`,
+      msg: 'live field no longer matches expected value',
+    }));
+}
+
+function readProductPath(product: PlytixProduct, path: string): unknown {
+  if (path.startsWith('attributes.')) {
+    return product.attributes?.[path.slice('attributes.'.length)];
+  }
+  return product[path];
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((value, index) => valuesEqual(value, right[index]))
+    );
+  }
+  if (isComparableObject(left) && isComparableObject(right)) {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return (
+      leftKeys.length === rightKeys.length &&
+      leftKeys.every((key, index) => key === rightKeys[index] && valuesEqual(left[key], right[key]))
+    );
+  }
+  return false;
+}
+
+function isComparableObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+type PatchRowResult =
+  | { status: 'success'; success: BatchUpdateSuccess }
+  | { status: 'failure'; failure: BatchUpdateFailure };
 
 async function patchRowWithRetry(
   ops: BatchUpdateOperations,
   row: ReadyRow,
   retries = 2
-): Promise<BatchUpdateFailure | undefined> {
+): Promise<PatchRowResult> {
   const body = buildPatchBody(row.item);
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -202,30 +341,53 @@ async function patchRowWithRetry(
       const updated = result.data?.[0];
       if (!updated?.id) {
         return {
-          index: row.index,
-          key: row.key,
-          product_id: row.productId,
-          stage: 'patch',
-          errors: [{ msg: `Product update returned no confirmed product for ${row.productId}` }],
+          status: 'failure',
+          failure: {
+            index: row.index,
+            key: row.key,
+            product_id: row.productId,
+            stage: 'patch',
+            errors: [{ msg: `Product update returned no confirmed product for ${row.productId}` }],
+          },
         };
       }
-      return undefined;
+      return {
+        status: 'success',
+        success: {
+          index: row.index,
+          key: row.key,
+          product_id: updated.id,
+          ...(typeof updated.modified === 'string' ? { modified: updated.modified } : {}),
+        },
+      };
     } catch (error) {
       if (attempt < retries && isTransientError(error)) {
         await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
         continue;
       }
       return {
-        index: row.index,
-        key: row.key,
-        product_id: row.productId,
-        stage: 'patch',
-        errors: parsePlytixErrors(error),
+        status: 'failure',
+        failure: {
+          index: row.index,
+          key: row.key,
+          product_id: row.productId,
+          stage: 'patch',
+          errors: parsePlytixErrors(error),
+        },
       };
     }
   }
 
-  return undefined;
+  return {
+    status: 'failure',
+    failure: {
+      index: row.index,
+      key: row.key,
+      product_id: row.productId,
+      stage: 'patch',
+      errors: [{ msg: 'Product update retry loop exited unexpectedly' }],
+    },
+  };
 }
 
 function isTransientError(error: unknown): boolean {

@@ -85,8 +85,8 @@ src/
 |------|-------------|
 | `products_create` | Create a new product (SKU required) |
 | `products_update` | Update product fields and attributes (PATCH) |
-| `products_batch_update` | Update a small batch of products by `product_id` or `sku` (PATCH loop; inline capped) |
-| `products_batch_update_manifest` | Update products from a local JSON manifest (stdio-only; supports dry run) |
+| `products_batch_update` | Update a small batch of products by `product_id` or `sku` (PATCH loop; inline capped; supports drift guards) |
+| `products_batch_update_manifest` | Update products from a local JSON manifest (stdio-only; supports dry run and drift guards) |
 | `products_assign_family` | Assign or unassign family (may cause data loss) |
 | `products_set_attribute` | Set one product attribute atomically |
 | `products_clear_attribute` | Clear one product attribute atomically |

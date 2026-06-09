@@ -15,6 +15,9 @@
 - Verify `sku` and `product_id` point to the same product before PATCH when both are
   present.
 - Add `dry_run` to both tools.
+- Add per-item optimistic guards with `expected_attributes` / `if_match`, reported as
+  `stage: "conflict"` with no PATCH when live data drifts.
+- Add opt-in per-item success rows with `return_successes` for exact caller ledgers.
 - Keep the 10,000 item cap for manifest runs. Stdio inline runs cap at 250 items and
   512 KB serialized payload; Worker inline runs cap at 50 items and 256 KB.
 - Long runs must tolerate token expiry, rate pacing, and retryable upstream failures.
@@ -69,6 +72,7 @@
    - resolve missing product IDs,
    - verify all `sku + product_id` pairs by resolving SKU and comparing IDs,
    - reject post-resolution duplicate product IDs,
+   - read guarded products immediately before PATCH and skip drifted rows as conflicts,
    - PATCH with bounded concurrency and pacing,
    - refresh auth on expiry/401 during long runs,
    - retry transient 5xx/timeouts before recording row failure,
@@ -78,8 +82,8 @@
 ## Step 3 - Tool Surfaces
 
 1. In `src/tools/products.ts`, register:
-   - `products_batch_update({ items, dry_run? })`
-   - `products_batch_update_manifest({ manifest_path, dry_run? })`
+   - `products_batch_update({ items, dry_run?, return_successes? })`
+   - `products_batch_update_manifest({ manifest_path, dry_run?, return_successes? })`
 2. Manifest tool behavior:
    - read UTF-8 JSON from disk,
    - require a `.json` path and `schema_version: 1`,

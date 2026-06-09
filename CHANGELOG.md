@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-09
+
+### Added
+- Added per-item optimistic-concurrency guards for batch updates via
+  `expected_attributes` and `if_match`, returning `stage: "conflict"` when live data
+  drifts before PATCH.
+- Added opt-in batch-update success rows with `return_successes` for exact caller ledgers.
+
+### Fixed
+- Guarded batch rows now read live product data immediately before PATCH and skip drifted
+  rows instead of applying stale read-modify-write updates.
+
 ## [0.3.0] - 2026-06-09
 
 ### Added

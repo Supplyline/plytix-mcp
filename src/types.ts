@@ -116,6 +116,8 @@ export interface BatchUpdateItem {
   label?: string;
   status?: string;
   attributes?: Record<string, unknown>;
+  expected_attributes?: Record<string, unknown>;
+  if_match?: Record<string, unknown>;
 }
 
 export type BatchUpdateFailureStage =
@@ -123,6 +125,7 @@ export type BatchUpdateFailureStage =
   | 'resolve'
   | 'verify'
   | 'duplicate'
+  | 'conflict'
   | 'patch';
 
 export interface BatchUpdateErrorDetail {
@@ -136,6 +139,13 @@ export interface BatchUpdateFailure {
   product_id?: string;
   stage: BatchUpdateFailureStage;
   errors: BatchUpdateErrorDetail[];
+}
+
+export interface BatchUpdateSuccess {
+  key: string;
+  index: number;
+  product_id: string;
+  modified?: string;
 }
 
 export interface BatchUpdateSummary {
@@ -163,6 +173,7 @@ export type BatchUpdateResult =
       dry_run?: boolean;
       summary: BatchUpdateSummary;
       failures: BatchUpdateFailure[];
+      successes?: BatchUpdateSuccess[];
       metadata?: BatchUpdateMetadata;
     };
 

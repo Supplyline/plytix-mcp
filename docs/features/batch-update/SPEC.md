@@ -55,6 +55,8 @@ interface BatchUpdateItem {
   label?: string;
   status?: string;
   attributes?: Record<string, unknown>; // null clears an attribute
+  expected_attributes?: Record<string, unknown>; // attribute drift guard
+  if_match?: Record<string, unknown>; // field-path drift guard, e.g. status or attributes.foo
 }
 ```
 
@@ -66,6 +68,7 @@ Validation before any write:
 - At least one of `label`, `status`, or non-empty `attributes` is required.
 - `attributes` must be a plain object when present.
 - `attributes: {}` is invalid unless `label` or `status` is present.
+- `expected_attributes` and `if_match` must be non-empty plain objects when present.
 - `null` values inside `attributes` are allowed because they clear attributes.
 - `sku` itself is not patchable in v1.
 - Attribute format/value validation is out of scope; Plytix rejects are surfaced per row.
@@ -75,6 +78,10 @@ Validation before any write:
 - When both `sku` and `product_id` are present, resolve the SKU and verify it maps to the
   same product before PATCH. Mismatches become row failures with `stage: "verify"` and
   that row is skipped.
+- When `expected_attributes` or `if_match` is present, read the live product immediately
+  before PATCH. If any expected value differs, skip the row with `stage: "conflict"`.
+  `expected_attributes` compares keys inside `product.attributes`; `if_match` compares
+  top-level fields or `attributes.<label>` paths.
 
 If any item is structurally invalid, reject the whole call and return the offending
 indices. Do not partially apply a structurally invalid batch.
@@ -134,7 +141,8 @@ filesystem. This is an intentional stdio-only exception to worker parity.
 ```ts
 {
   items: BatchUpdateItem[],
-  dry_run?: boolean
+  dry_run?: boolean,
+  return_successes?: boolean
 }
 ```
 
@@ -145,8 +153,11 @@ Rules:
 - Worker inline cap: **50 items** and **256 KB** serialized payload.
 - Large or text-heavy updates should use the stdio manifest tool even when under the item
   cap.
+- `return_successes: true` includes one success row per patched product for exact caller
+  ledger updates. It defaults off to keep large responses compact.
 
-`products_batch_update_manifest` also accepts `dry_run?: boolean`.
+`products_batch_update_manifest` also accepts `dry_run?: boolean` and
+`return_successes?: boolean`.
 
 Dry run:
 
@@ -154,6 +165,7 @@ Dry run:
 - computes `manifest_sha256` when applicable,
 - resolves SKUs,
 - verifies `sku`/`product_id` pairs,
+- checks `expected_attributes` and `if_match` against current live product data,
 - detects duplicate targets,
 - returns the same result shape with `dry_run: true`,
 - performs zero PATCH calls.
@@ -167,11 +179,13 @@ Primary v1 implementation uses documented product APIs from
 2. Resolve missing `product_id` values by exact SKU search:
    `POST /api/v2/products/search`, with no `pagination.order`, `page_size <= 100`,
    and paging through each chunk until `pagination.pages` is exhausted.
-3. PATCH each product with bounded concurrency:
+3. For rows with `expected_attributes` or `if_match`, read the live product and compare
+   expected values immediately before PATCH. Drift is returned as `stage: "conflict"`.
+4. PATCH each product with bounded concurrency:
    `PATCH /api/v2/products/:product_id`.
-4. Reuse existing auth, timeout, 401 retry, and 429 backoff in `client.ts` and
+5. Reuse existing auth, timeout, 401 retry, and 429 backoff in `client.ts` and
    `worker-client.ts`.
-5. Return per-key success/failure results.
+6. Return per-key success/failure results.
 
 Step 0 remains first, but it is an acceleration probe, not a build gate:
 
@@ -214,8 +228,14 @@ Completed run:
     index: number,
     key: string,
     product_id?: string,
-    stage: "resolve" | "verify" | "patch",
+    stage: "resolve" | "verify" | "conflict" | "patch",
     errors: Array<{ field?: string, msg: string }>
+  }>,
+  successes?: Array<{
+    index: number,
+    key: string,
+    product_id: string,
+    modified?: string
   }>,
   metadata?: BatchMetadata
 }
@@ -240,6 +260,8 @@ Result rules:
 - Validation or duplicate batch-level errors return `status: "rejected"` with no API
   mutations.
 - Unresolved SKU or `sku`/`product_id` mismatch is a row failure and skipped PATCH.
+- `expected_attributes` or `if_match` mismatches are row failures with
+  `stage: "conflict"` and skipped PATCH.
 - PATCH failure is a row failure.
 - Success only means the PATCH request succeeded for that row.
 
@@ -248,6 +270,7 @@ Result rules:
 - Structural validation errors reject the whole call before any API request.
 - SKU resolution failures are row failures with `stage: "resolve"`.
 - SKU/product ID mismatches are row failures with `stage: "verify"`.
+- Optimistic-concurrency guard mismatches are row failures with `stage: "conflict"`.
 - Plytix PATCH rejects are row failures with `stage: "patch"` and the Plytix
   `{ field, msg }` details when available.
 - Unexpected or unparsable Plytix errors still include a clear message and the row key.
@@ -284,8 +307,11 @@ Unit tests with no live API:
 - `product_id` + `sku` together is valid and reports by `sku`.
 - SKU resolution and verification: found, not found, duplicate SKU result, mismatch
   between `sku` and `product_id`, and fallback/error mapping.
+- Optimistic-concurrency guards: matching live values, drifted live values, and no PATCH
+  after a guard conflict.
 - PATCH aggregation: mixed successes/failures, preserved indices, correct
   `succeeded`/`failed`/`skipped` counts.
+- Optional success rows: `return_successes` reports exact patched keys/product IDs.
 - Error parsing: Plytix `{ error: { errors: [...] } }`, top-level messages, and unknown
   errors.
 - Manifest read: valid file, missing file, non-JSON path, oversized file, malformed JSON,
