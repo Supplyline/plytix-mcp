@@ -14,6 +14,7 @@ import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
+import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -615,6 +616,37 @@ const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_batch_update',
+    description: 'Update a small batch of products by product_id or sku using documented product PATCH operations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: `Products to update (max ${WORKER_INLINE_MAX_ITEMS} items and ${WORKER_INLINE_MAX_BYTES} serialized bytes)`,
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Product SKU for reporting and resolution' },
+              product_id: { type: 'string', description: 'Product ID to PATCH when known' },
+              label: { type: 'string', description: 'New product label/name' },
+              status: { type: 'string', description: 'New product status' },
+              attributes: {
+                type: 'object',
+                description: 'Attributes to update (use attribute labels as keys, null to clear)',
+              },
+            },
+          },
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'Validate, resolve, and verify the batch without applying PATCH updates',
+        },
+      },
+      required: ['items'],
     },
   },
   {
@@ -1685,6 +1717,19 @@ const toolHandlers: Record<string, ToolHandler> = {
           ),
         },
       ],
+    };
+  },
+
+  async products_batch_update(args, client) {
+    const result = await client.batchUpdateProducts(args.items, {
+      dryRun: args.dry_run === true,
+      maxItems: WORKER_INLINE_MAX_ITEMS,
+      maxBytes: WORKER_INLINE_MAX_BYTES,
+    });
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      ...(result.status === 'rejected' ? { isError: true } : {}),
     };
   },
 

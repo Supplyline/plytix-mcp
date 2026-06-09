@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-09
+
+### Added
+- Added `products_batch_update` so agents can apply small product-update batches through
+  the documented product PATCH path, with dry-run validation and per-row failure reporting.
+- Added stdio-only `products_batch_update_manifest` so large local JSON manifests can run
+  without sending manifest bytes through the model context.
+- Added shared batch-update guardrails for SKU resolution, `sku`/`product_id` verification,
+  duplicate detection, request pacing, retry handling, manifest hashing, and separate
+  stdio/Worker payload caps.
+
+### Changed
+- Documented the batch-update implementation plan, REST evidence gate, and Worker parity
+  exception for the stdio-only manifest tool.
+
+### Fixed
+- SKU resolution now pages through all search result pages before verification, so duplicate
+  SKU matches cannot hide behind page 1 during batch updates.
+
 ## [0.2.2] - 2026-05-31
 
 Follow-up fixes from post-merge code review. No breaking changes.
