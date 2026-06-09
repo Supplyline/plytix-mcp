@@ -12,6 +12,20 @@ import type { PlytixProduct } from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
 import type { IdentifierType } from '../lookup/identifier.js';
+import {
+  MANIFEST_MAX_ITEMS,
+  STDIO_INLINE_MAX_BYTES,
+  STDIO_INLINE_MAX_ITEMS,
+} from '../batch/helpers.js';
+import { readBatchManifest } from '../batch/manifest.js';
+
+const batchUpdateItemSchema = z.object({
+  sku: z.string().min(1).optional(),
+  product_id: z.string().min(1).optional(),
+  label: z.string().optional(),
+  status: z.string().optional(),
+  attributes: z.record(z.unknown()).optional(),
+});
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
   // Create lookup instance for smart search
@@ -551,6 +565,103 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
             {
               type: 'text',
               text: `Error updating product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_update - Batch update products by product_id/sku
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    items: unknown[];
+    dry_run?: boolean;
+  }>(
+    server,
+    'products_batch_update',
+    {
+      title: 'Batch Update Products',
+      description: 'Update a small batch of products by product_id or sku using documented product PATCH operations.',
+      inputSchema: {
+        items: z
+          .array(batchUpdateItemSchema)
+          .describe(`Products to update (max ${STDIO_INLINE_MAX_ITEMS} items and ${STDIO_INLINE_MAX_BYTES} serialized bytes)`),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe('Validate, resolve, and verify the batch without applying PATCH updates'),
+      },
+    },
+    async ({ items, dry_run }) => {
+      try {
+        const result = await client.batchUpdateProducts(items, {
+          dryRun: dry_run === true,
+          maxItems: STDIO_INLINE_MAX_ITEMS,
+          maxBytes: STDIO_INLINE_MAX_BYTES,
+        });
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error running batch update: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_update_manifest - Stdio-only manifest batch update
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    manifest_path: string;
+    dry_run?: boolean;
+  }>(
+    server,
+    'products_batch_update_manifest',
+    {
+      title: 'Batch Update Products From Manifest',
+      description: 'Read a local JSON manifest and update products without sending large payloads through the model context.',
+      inputSchema: {
+        manifest_path: z.string().min(1).describe('Path to a schema_version: 1 JSON manifest'),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe('Validate, resolve, and verify the manifest without applying PATCH updates'),
+      },
+    },
+    async ({ manifest_path, dry_run }) => {
+      try {
+        const manifest = await readBatchManifest(manifest_path);
+        const result = await client.batchUpdateProducts(manifest.items, {
+          dryRun: dry_run === true,
+          maxItems: MANIFEST_MAX_ITEMS,
+          metadata: manifest.metadata,
+        });
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error reading batch manifest: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
           isError: true,

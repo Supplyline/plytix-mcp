@@ -24,8 +24,19 @@ import type {
   PlytixFilterDefinition,
   PlytixRelationshipDefinition,
   RateLimitInfo,
+  BatchUpdateMetadata,
+  BatchUpdateResult,
 } from './types.js';
 import { PlytixError } from './types.js';
+import {
+  WORKER_INLINE_MAX_ITEMS,
+  type BatchValidationOptions,
+} from './batch/helpers.js';
+import {
+  executeBatchUpdate,
+  type ExecuteBatchUpdateOptions,
+  type ResolvedProductRef,
+} from './batch/runner.js';
 
 const DEFAULT_CONFIG = {
   baseUrl: 'https://pim.plytix.com',
@@ -291,6 +302,48 @@ export class WorkerPlytixClient {
     return this.request<PlytixProduct>('/api/v2/products/search', {
       method: 'POST',
       body: JSON.stringify(body),
+    });
+  }
+
+  async resolveProductIdsBySku(skus: string[]): Promise<Map<string, ResolvedProductRef[]>> {
+    const resolved = new Map<string, ResolvedProductRef[]>();
+    const uniqueSkus = Array.from(new Set(skus.filter(Boolean)));
+    const chunkSize = 100;
+
+    for (let i = 0; i < uniqueSkus.length; i += chunkSize) {
+      const batch = uniqueSkus.slice(i, i + chunkSize);
+      const result = await this.searchProducts({
+        filters: [[{ field: 'sku', operator: 'in', value: batch }]],
+        attributes: ['sku'],
+        pagination: { page: 1, page_size: 100 },
+      });
+
+      for (const product of result.data ?? []) {
+        if (!product.sku) continue;
+        resolved.set(product.sku, [
+          ...(resolved.get(product.sku) ?? []),
+          { id: product.id, sku: product.sku },
+        ]);
+      }
+    }
+
+    return resolved;
+  }
+
+  async batchUpdateProducts(
+    items: unknown,
+    options: Partial<ExecuteBatchUpdateOptions> & {
+      metadata?: BatchUpdateMetadata;
+      maxItems?: BatchValidationOptions['maxItems'];
+    } = {}
+  ): Promise<BatchUpdateResult> {
+    return executeBatchUpdate(this, items, {
+      maxItems: options.maxItems ?? WORKER_INLINE_MAX_ITEMS,
+      maxBytes: options.maxBytes,
+      dryRun: options.dryRun,
+      metadata: options.metadata,
+      concurrency: options.concurrency,
+      requestDelayMs: options.requestDelayMs,
     });
   }
 

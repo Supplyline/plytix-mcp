@@ -106,6 +106,66 @@ export interface PlytixProduct {
   [key: string]: unknown;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Batch Product Updates
+// ─────────────────────────────────────────────────────────────
+
+export interface BatchUpdateItem {
+  sku?: string;
+  product_id?: string;
+  label?: string;
+  status?: string;
+  attributes?: Record<string, unknown>;
+}
+
+export type BatchUpdateFailureStage =
+  | 'validation'
+  | 'resolve'
+  | 'verify'
+  | 'duplicate'
+  | 'patch';
+
+export interface BatchUpdateErrorDetail {
+  field?: string;
+  msg: string;
+}
+
+export interface BatchUpdateFailure {
+  key: string;
+  index: number;
+  product_id?: string;
+  stage: BatchUpdateFailureStage;
+  errors: BatchUpdateErrorDetail[];
+}
+
+export interface BatchUpdateSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface BatchUpdateMetadata {
+  series_id?: string;
+  config_snapshot_hash?: string;
+  manifest_sha256?: string;
+}
+
+export type BatchUpdateResult =
+  | {
+      status: 'rejected';
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      metadata?: BatchUpdateMetadata;
+    }
+  | {
+      status: 'finished';
+      dry_run?: boolean;
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      metadata?: BatchUpdateMetadata;
+    };
+
 export interface PlytixRelationship {
   relationship_id: string;
   relationship_label: string;
