@@ -302,6 +302,8 @@ function readProductPath(product: PlytixProduct, path: string): unknown {
 function guardValueMatches(live: unknown, expected: unknown): boolean {
   // JSON cannot express `undefined`, so a guard's `null` means "expect empty": it matches a
   // live value that is null OR absent. A present empty string is a value and does NOT match.
+  // Nullish equivalence applies only at the TOP level of the expected object — nested nulls
+  // inside objects/arrays compare strictly via valuesEqual.
   if (expected === null) return live === null || live === undefined;
   return valuesEqual(live, expected);
 }

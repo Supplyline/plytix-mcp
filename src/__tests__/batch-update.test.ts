@@ -422,6 +422,25 @@ describe('executeBatchUpdate', () => {
     );
     expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
   });
+
+  it('dry-run with a null guard passes when the attribute is absent', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      live: { 'product-1': { id: 'product-1', attributes: {} } },
+    });
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { opt_1: 'new' }, expected_attributes: { opt_1: null } }],
+      { maxItems: 250, dryRun: true, requestDelayMs: 0 }
+    );
+    expect(result).toMatchObject({
+      status: 'finished',
+      dry_run: true,
+      summary: { total: 1, succeeded: 0, failed: 0, skipped: 1 },
+    });
+    expect(result.failures).toEqual([]);
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
 });
 
 describe('SKU resolution pagination', () => {
