@@ -271,7 +271,7 @@ function compareExpectedAttributes(
   if (!expected) return [];
 
   return Object.entries(expected)
-    .filter(([field, value]) => !valuesEqual(product.attributes?.[field], value))
+    .filter(([field, value]) => !guardValueMatches(product.attributes?.[field], value))
     .map(([field]) => ({
       field: `expected_attributes.${field}`,
       msg: 'live attribute no longer matches expected value',
@@ -285,7 +285,7 @@ function compareIfMatch(
   if (!expected) return [];
 
   return Object.entries(expected)
-    .filter(([field, value]) => !valuesEqual(readProductPath(product, field), value))
+    .filter(([field, value]) => !guardValueMatches(readProductPath(product, field), value))
     .map(([field]) => ({
       field: `if_match.${field}`,
       msg: 'live field no longer matches expected value',
@@ -297,6 +297,13 @@ function readProductPath(product: PlytixProduct, path: string): unknown {
     return product.attributes?.[path.slice('attributes.'.length)];
   }
   return product[path];
+}
+
+function guardValueMatches(live: unknown, expected: unknown): boolean {
+  // JSON cannot express `undefined`, so a guard's `null` means "expect empty": it matches a
+  // live value that is null OR absent. A present empty string is a value and does NOT match.
+  if (expected === null) return live === null || live === undefined;
+  return valuesEqual(live, expected);
 }
 
 function valuesEqual(left: unknown, right: unknown): boolean {
