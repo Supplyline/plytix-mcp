@@ -284,6 +284,52 @@ describe('executeBatchUpdate', () => {
     expect(ops.updateProduct).not.toHaveBeenCalled();
   });
 
+  it('checks each guarded row immediately before its own PATCH', async () => {
+    const events: string[] = [];
+    const ops = makeOps({
+      get: async (productId) => {
+        events.push(`get:${productId}`);
+        return {
+          data: [
+            {
+              id: productId,
+              attributes: { google_detail: `${productId}:old` },
+            },
+          ],
+        };
+      },
+      update: async (productId) => {
+        events.push(`patch:${productId}`);
+        return productResult(productId);
+      },
+    });
+
+    const result = await executeBatchUpdate(
+      ops,
+      [
+        {
+          product_id: 'product-1',
+          attributes: { google_detail: 'one:new' },
+          expected_attributes: { google_detail: 'product-1:old' },
+        },
+        {
+          product_id: 'product-2',
+          attributes: { google_detail: 'two:new' },
+          expected_attributes: { google_detail: 'product-2:old' },
+        },
+      ],
+      { maxItems: 250, concurrency: 1, requestDelayMs: 0 }
+    );
+
+    expect(result.summary).toEqual({ total: 2, succeeded: 2, failed: 0, skipped: 0 });
+    expect(events).toEqual([
+      'get:product-1',
+      'patch:product-1',
+      'get:product-2',
+      'patch:product-2',
+    ]);
+  });
+
   it('returns exact success rows when requested', async () => {
     const ops = makeOps();
 

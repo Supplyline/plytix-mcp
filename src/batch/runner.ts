@@ -160,28 +160,25 @@ export async function executeBatchUpdate(
     return rejectedResult(total, [...failures, ...duplicateFailures], options.metadata);
   }
 
-  const guardRows = readyRows.filter((row) => row.item.expected_attributes || row.item.if_match);
-  const guardResults =
-    guardRows.length > 0
-      ? await runWithConcurrency(
-          guardRows,
-          {
-            concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
-            requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
-          },
-          (row) => checkRowGuard(ops, row)
-        )
-      : [];
-  const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
-  const conflictedIndices = new Set(guardFailures.map((failure) => failure.index));
-  const patchRows = readyRows.filter((row) => !conflictedIndices.has(row.index));
-  const prePatchFailures = [...failures, ...guardFailures];
-
   if (options.dryRun) {
+    const guardRows = readyRows.filter((row) => row.item.expected_attributes || row.item.if_match);
+    const guardResults =
+      guardRows.length > 0
+        ? await runWithConcurrency(
+            guardRows,
+            {
+              concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
+              requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
+            },
+            (row) => checkRowGuard(ops, row)
+          )
+        : [];
+    const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
+
     return finishedResult({
       total,
       succeeded: 0,
-      failures: prePatchFailures,
+      failures: [...failures, ...guardFailures],
       skipped: total,
       dryRun: true,
       metadata: options.metadata,
@@ -189,7 +186,7 @@ export async function executeBatchUpdate(
   }
 
   const patchResults = await runWithConcurrency(
-    patchRows,
+    readyRows,
     {
       concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
       requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
@@ -207,13 +204,14 @@ export async function executeBatchUpdate(
       result?.status === 'success'
     )
     .map((result) => result.success);
-  const allFailures = [...prePatchFailures, ...patchFailures];
+  const allFailures = [...failures, ...patchFailures];
+  const conflictFailures = patchFailures.filter((failure) => failure.stage === 'conflict');
 
   return finishedResult({
     total,
-    succeeded: patchRows.length - patchFailures.length,
+    succeeded: readyRows.length - patchFailures.length,
     failures: allFailures,
-    skipped: prePatchFailures.length,
+    skipped: failures.length + conflictFailures.length,
     ...(options.returnSuccesses ? { successes } : {}),
     metadata: options.metadata,
   });
@@ -333,6 +331,11 @@ async function patchRowWithRetry(
   row: ReadyRow,
   retries = 2
 ): Promise<PatchRowResult> {
+  const guardFailure = await checkRowGuard(ops, row);
+  if (guardFailure) {
+    return { status: 'failure', failure: guardFailure };
+  }
+
   const body = buildPatchBody(row.item);
 
   for (let attempt = 0; attempt <= retries; attempt++) {
