@@ -47,6 +47,37 @@ verification (SPEC "Live verification"), then the manifest run via
 products_batch_update_manifest (dry_run first).
 
 
+2026-06-11 — 4-SKU live verification COMPLETE (PRs #28-#30 merged)
+------------------------------------------------------------------
+All three overnight PRs merged to main. Ran the real batch code path
+(client.batchUpdateProducts, same code the stdio tools call) against live
+Plytix with .env creds. SKUs: LMI-PD041929NI (5e0110bb86228d42be6122cc),
+LMI-PD041A28HI (5e0110bd86228d42be6122d6), LMI-PD041A28AI
+(5e0110bc86228d42be6122d4), LMI-PD041 (5e052aa9b780b3e62bdf86ae).
+
+- Dry-run (zero writes): 3 resolve+verify OK; 1 with a deliberately-wrong
+  product_id → stage:"verify" failure, per-row keyed by sku. summary
+  invariant held (succeeded 0 + failed 1 + skipped 3 = total 4).
+- Real no-op PATCH (status:"Completed" written back to already-Completed
+  rows): 4/4 succeeded, per-row successes keyed by sku, summary 4/0/0.
+- FINDING: a same-value status PATCH is a true server-side no-op — Plytix
+  did NOT bump `modified` (read-back of LMI-PD041929NI still
+  2026-06-10T13:59:27). Reassuring for idempotent re-runs; note the REAL
+  backfill writes CHANGED box_n/opt_n/google_detail values, which WILL bump
+  modified (expected).
+
+Deployment state to be aware of:
+- Remote worker NOT redeployed since the merge — live `plytix` worker still
+  exposes only single products_update, no batch tools. Redeploy
+  (`npm run deploy`) only when ready (also pushes #29 OAuth hardening live);
+  it gives inline products_batch_update on web/mobile but NOT the manifest
+  backfill.
+- The 620-SKU backfill must run via STDIO (products_batch_update_manifest is
+  stdio-only — worker has no filesystem) OR an ETL-side node script calling
+  client.batchUpdateProducts(manifest.items, {...}) directly. The async
+  /api/v1/jobs permission is NOT needed (tools use the documented PATCH loop).
+
+
 2026-06-01 — "Could not attach to MCP server plytix" investigation + hardening
 ------------------------------------------------------------------------------
 Trigger: after a reboot, Claude (Desktop) showed "Could not attach to MCP server plytix".
