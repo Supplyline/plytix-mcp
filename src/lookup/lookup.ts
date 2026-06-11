@@ -121,11 +121,15 @@ export class PlytixLookup {
     private client: PlytixClient,
     private cfg: LookupConfig = {}
   ) {
+    // Drop explicit-undefined entries so they can't override the defaults below.
+    const defined = Object.fromEntries(
+      Object.entries(cfg).filter(([, v]) => v !== undefined)
+    );
     this.cfg = {
       pageSize: 5,
       cacheEnabled: true,
       cacheTtlMs: 60_000, // 1 minute
-      ...cfg,
+      ...defined,
     };
 
     // Initialize search fields from config, env var, or defaults
@@ -210,7 +214,7 @@ export class PlytixLookup {
     this.cache.set(key, {
       result,
       timestamp: Date.now(),
-      ttl: this.cfg.cacheTtlMs!,
+      ttl: this.cfg.cacheTtlMs ?? 60_000,
     });
 
     // Simple cleanup when cache grows too large

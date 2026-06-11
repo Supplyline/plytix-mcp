@@ -59,6 +59,7 @@ export class PlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
   private attributeCache?: { byLabel: Map<string, PlytixAttributeDetail>; expires: number };
+  private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
 
   constructor(config?: Partial<PlytixClientConfig>) {
     this.config = {
@@ -454,10 +455,11 @@ export class PlytixClient {
    * Use getAttribute() to get full details including options.
    */
   async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
     const attrIds: string[] = [];
     let page = 1;
 
-    while (true) {
+    while (page <= MAX_PAGES) {
       const result = await this.request<{ id: string; filter_type?: string }>(
         '/api/v1/attributes/product/search',
         {
@@ -491,28 +493,63 @@ export class PlytixClient {
   /**
    * Build attribute cache indexed by label. Fetches all attributes once,
    * then caches for 5 minutes to avoid N+1 queries on repeated lookups.
+   * Deduplicates concurrent callers via shared promise.
    */
   private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
-    const now = Date.now();
-    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
     // Return cached if still valid
-    if (this.attributeCache && now < this.attributeCache.expires) {
+    if (this.attributeCache && Date.now() < this.attributeCache.expires) {
       return this.attributeCache.byLabel;
     }
+    if (this.attributeCachePromise) return this.attributeCachePromise;
 
-    // Fetch all attribute IDs, then details in parallel (graceful partial failure)
+    this.attributeCachePromise = this.doBuildAttributeCache();
+    try {
+      return await this.attributeCachePromise;
+    } finally {
+      this.attributeCachePromise = undefined;
+    }
+  }
+
+  private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
     const attrIds = await this.searchAttributeIds();
-    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
+
+    if (attrIds.length === 0) {
+      throw new PlytixError(
+        'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
+      );
+    }
+
+    // Fetch in batches to avoid overwhelming Plytix rate limits
+    const BATCH_SIZE = 10;
+    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
+    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
+      const batch = attrIds.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((id) => this.getAttributeById(id))
+      );
+      allResults.push(...batchResults);
+    }
 
     const byLabel = new Map<string, PlytixAttributeDetail>();
-    for (const result of results) {
+    let failures = 0;
+    for (const result of allResults) {
       if (result.status === 'fulfilled' && result.value?.label) {
         byLabel.set(result.value.label, result.value);
+      } else {
+        failures++;
       }
     }
 
-    this.attributeCache = { byLabel, expires: now + CACHE_TTL_MS };
+    // If >20% of fetches failed or returned empty, don't cache — surface the error
+    if (failures > attrIds.length * 0.2) {
+      throw new PlytixError(
+        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
+      );
+    }
+
+    this.attributeCache = { byLabel, expires: Date.now() + CACHE_TTL_MS };
     return byLabel;
   }
 
