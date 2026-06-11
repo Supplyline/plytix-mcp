@@ -34,6 +34,8 @@ interface Env {
   // refuse to operate without this secret so credentials are never stored
   // in plaintext.
   OAUTH_TOKEN_SECRET?: string;
+  // Access-token lifetime in seconds. Default 7 days; clamped to [1 hour, 30 days].
+  OAUTH_TOKEN_TTL_SECONDS?: string;
 }
 
 interface JsonRpcRequest {
@@ -206,17 +208,124 @@ async function decryptCreds(
 // registered list. This is the control that prevents authorization codes
 // (and the credentials they unlock) from being delivered to an
 // attacker-controlled URL.
+interface ClientRegistration {
+  redirect_uris?: unknown;
+  client_name?: unknown;
+}
+
+async function getClientRegistration(
+  kv: KVNamespace,
+  clientId: string
+): Promise<ClientRegistration | null> {
+  if (!clientId) return null;
+  return (await kv.get(`client:${clientId}`, 'json')) as ClientRegistration | null;
+}
+
+function redirectUriMatches(client: ClientRegistration | null, redirectUri: string): boolean {
+  if (!client || !redirectUri || !Array.isArray(client.redirect_uris)) return false;
+  return client.redirect_uris.includes(redirectUri);
+}
+
 async function isRegisteredRedirectUri(
   kv: KVNamespace,
   clientId: string,
   redirectUri: string
 ): Promise<boolean> {
-  if (!clientId || !redirectUri) return false;
-  const client = (await kv.get(`client:${clientId}`, 'json')) as {
-    redirect_uris?: unknown;
-  } | null;
-  if (!client || !Array.isArray(client.redirect_uris)) return false;
-  return client.redirect_uris.includes(redirectUri);
+  return redirectUriMatches(await getClientRegistration(kv, clientId), redirectUri);
+}
+
+// Validate redirect URIs at registration time. Exact-match checking at
+// authorize/token time is the load-bearing control; this narrows what can be
+// registered at all: https everywhere, plain http only for local loopback
+// development. Custom app schemes are intentionally rejected until a real
+// client needs one.
+function isAcceptableRedirectUri(uri: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol === 'http:') {
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  }
+  return false;
+}
+
+// Constant-time string comparison. Not strictly required for PKCE (the
+// compared challenge already traveled in the authorize URL), but uniform
+// comparison cost is cheap hygiene for anything auth-shaped.
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length, 1);
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+// Coarse fixed-window rate limiter backed by KV. KV is eventually consistent
+// across edge locations, so this is an abuse brake, not an exact counter —
+// good enough to blunt credential-stuffing through /authorize and KV spam
+// through /register. Returns false when the caller is over the limit.
+async function rateLimit(
+  kv: KVNamespace,
+  scope: string,
+  key: string,
+  limit: number,
+  windowSeconds: number
+): Promise<boolean> {
+  const kvKey = `rl:${scope}:${key}`;
+  const now = Date.now();
+  const existing = (await kv.get(kvKey, 'json')) as { count: number; windowStart: number } | null;
+  if (!existing || now - existing.windowStart > windowSeconds * 1000) {
+    await kv.put(kvKey, JSON.stringify({ count: 1, windowStart: now }), {
+      expirationTtl: Math.max(windowSeconds * 2, 60),
+    });
+    return true;
+  }
+  if (existing.count >= limit) return false;
+  await kv.put(
+    kvKey,
+    JSON.stringify({ count: existing.count + 1, windowStart: existing.windowStart }),
+    { expirationTtl: Math.max(windowSeconds * 2, 60) }
+  );
+  return true;
+}
+
+function rateLimitedResponse(
+  windowSeconds: number,
+  corsHeaders: Record<string, string> = {}
+): Response {
+  return new Response(
+    JSON.stringify({ error: 'rate_limited', error_description: 'Too many requests' }),
+    {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': String(windowSeconds),
+        ...corsHeaders,
+      },
+    }
+  );
+}
+
+function clientIpOf(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') || 'unknown';
+}
+
+// Parse + clamp the configured access-token TTL. Default 7 days.
+function resolveTokenTtlSeconds(raw?: string): number {
+  const DEFAULT = 60 * 60 * 24 * 7;
+  const MIN = 60 * 60;
+  const MAX = 60 * 60 * 24 * 30;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed)) return DEFAULT;
+  return Math.min(MAX, Math.max(MIN, parsed));
 }
 
 function escapeHtml(str: string): string {
@@ -235,10 +344,24 @@ function renderAuthorizePage(params: {
   codeChallenge: string;
   codeChallengeMethod: string;
   scope: string;
+  clientName?: string;
   error?: string;
 }): string {
   const errorHtml = params.error
     ? `<div class="error">${escapeHtml(params.error)}</div>`
+    : '';
+
+  // Show the user WHO is asking and WHERE the auth code will be sent.
+  // client_name is attacker-controlled input — always escaped.
+  const requesterName = params.clientName?.trim() ? params.clientName.trim() : 'An application';
+  let redirectHost = '';
+  try {
+    redirectHost = new URL(params.redirectUri).host;
+  } catch {
+    redirectHost = '';
+  }
+  const destinationHtml = redirectHost
+    ? `<div class="info">After you approve, an access code will be sent to <strong>${escapeHtml(redirectHost)}</strong>.</div>`
     : '';
 
   return `<!DOCTYPE html>
@@ -267,8 +390,9 @@ function renderAuthorizePage(params: {
 <body>
   <div class="card">
     <h1>Plytix MCP</h1>
-    <p class="subtitle">An application is requesting access to your Plytix PIM data.</p>
+    <p class="subtitle"><strong>${escapeHtml(requesterName)}</strong> is requesting access to your Plytix PIM data.</p>
     ${errorHtml}
+    ${destinationHtml}
     <div class="info">Enter your Plytix API credentials. They are stored securely and used only to access the Plytix API on your behalf.</div>
     <form method="POST" action="/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(params.clientId)}">
@@ -2609,8 +2733,36 @@ export default {
         );
       }
 
+      if (!(await rateLimit(env.OAUTH_KV, 'register', clientIpOf(request), 10, 3600))) {
+        return rateLimitedResponse(3600, corsHeaders);
+      }
+
       try {
         const regBody = (await request.json()) as Record<string, unknown>;
+
+        // Validate redirect_uris before storing anything: must be 1-10 strings,
+        // each https (or http on localhost). The authorize-time exact match is
+        // the primary control; this keeps junk and dangerous schemes out of KV.
+        const redirectUris = regBody.redirect_uris;
+        if (
+          !Array.isArray(redirectUris) ||
+          redirectUris.length === 0 ||
+          redirectUris.length > 10 ||
+          !redirectUris.every((u) => typeof u === 'string' && isAcceptableRedirectUri(u))
+        ) {
+          return new Response(
+            JSON.stringify({
+              error: 'invalid_client_metadata',
+              error_description:
+                'redirect_uris must be 1-10 https URLs (http allowed only for localhost)',
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
+
+        const clientName =
+          typeof regBody.client_name === 'string' ? regBody.client_name.trim().slice(0, 100) : '';
+
         const clientId = generateToken(16);
         const authMethod = (regBody.token_endpoint_auth_method as string) || 'none';
         const clientSecret = authMethod === 'none' ? undefined : generateToken(32);
@@ -2618,8 +2770,8 @@ export default {
         const registration = {
           client_id: clientId,
           ...(clientSecret ? { client_secret: clientSecret } : {}),
-          redirect_uris: regBody.redirect_uris || [],
-          client_name: regBody.client_name || '',
+          redirect_uris: redirectUris,
+          client_name: clientName,
           token_endpoint_auth_method: authMethod,
           grant_types: ['authorization_code'],
           response_types: ['code'],
@@ -2685,15 +2837,19 @@ export default {
       // becomes a credential-harvesting oracle: an attacker who initiates the
       // flow with their own redirect_uri + PKCE challenge would receive an auth
       // code (and thus the victim's credentials) at a URL they control.
-      if (!(await isRegisteredRedirectUri(env.OAUTH_KV, clientId, redirectUri))) {
+      const registration = await getClientRegistration(env.OAUTH_KV, clientId);
+      if (!redirectUriMatches(registration, redirectUri)) {
         return new Response(
           JSON.stringify({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' }),
           { status: 400, headers: { 'Content-Type': 'application/json' } }
         );
       }
 
+      const clientName =
+        typeof registration?.client_name === 'string' ? registration.client_name : '';
+
       return new Response(
-        renderAuthorizePage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope }),
+        renderAuthorizePage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope, clientName }),
         { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
       );
     }
@@ -2712,6 +2868,12 @@ export default {
           JSON.stringify({ error: 'server_error', error_description: 'OAuth credential encryption not configured' }),
           { status: 500, headers: { 'Content-Type': 'application/json' } }
         );
+      }
+
+      // Each POST forwards submitted credentials to Plytix's auth endpoint —
+      // without a limit this is an unthrottled credential-testing oracle.
+      if (!(await rateLimit(oauthKv, 'authorize', clientIpOf(request), 10, 300))) {
+        return rateLimitedResponse(300);
       }
 
       const formData = await request.formData();
@@ -2813,6 +2975,10 @@ export default {
         );
       }
 
+      if (!(await rateLimit(env.OAUTH_KV, 'token', clientIpOf(request), 30, 300))) {
+        return rateLimitedResponse(300, corsHeaders);
+      }
+
       // Parse body (supports both form-encoded and JSON)
       let tokenParams: Record<string, string>;
       const contentType = request.headers.get('Content-Type') || '';
@@ -2873,7 +3039,7 @@ export default {
 
       // Verify PKCE (S256)
       const expectedChallenge = await computeS256(code_verifier);
-      if (expectedChallenge !== codeData.code_challenge) {
+      if (!timingSafeEqualStr(expectedChallenge, codeData.code_challenge)) {
         return new Response(
           JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }),
           { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
@@ -2884,7 +3050,7 @@ export default {
       // from the auth code straight into the token record (same key, so no
       // decrypt/re-encrypt needed) and bound the token's lifetime.
       const accessToken = generateToken(32);
-      const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+      const TOKEN_TTL_SECONDS = resolveTokenTtlSeconds(env.OAUTH_TOKEN_TTL_SECONDS);
       await env.OAUTH_KV.put(
         `token:${accessToken}`,
         JSON.stringify({

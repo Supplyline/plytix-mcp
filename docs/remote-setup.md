@@ -194,6 +194,23 @@ curl http://localhost:8787/health
 - **HTTPS only** - All production traffic is encrypted
 - **No logging of credentials** - API keys are not logged
 
+### OAuth hardening
+
+- **Access-token TTL**: tokens issued by `/token` default to **7 days**. Override with the
+  `OAUTH_TOKEN_TTL_SECONDS` worker var (clamped to 1 hour – 30 days).
+- **Rate limits** (per client IP, KV-backed fixed window; coarse by design since KV is
+  eventually consistent): `POST /authorize` 10/5min, `POST /register` 10/hour,
+  `POST /token` 30/5min. Over-limit requests get `429` with `Retry-After`. If real abuse
+  is observed, add zone-level Cloudflare WAF rate rules on top.
+- **Registration validation**: `redirect_uris` must be 1–10 `https:` URLs (`http:` only
+  for `localhost`/`127.0.0.1`); `client_name` is truncated to 100 chars. The consent page
+  shows the requesting client's name and the redirect destination host.
+- **Emergency revocation**: there is no per-token revoke endpoint. To invalidate ALL
+  outstanding OAuth tokens at once, rotate the encryption secret:
+  `wrangler secret put OAUTH_TOKEN_SECRET` — stored credential blobs become
+  undecryptable and every client must re-authorize. Rotating the Plytix API
+  credentials themselves has the same effect at the PIM boundary.
+
 ## Troubleshooting
 
 ### "Missing Plytix API credentials"
