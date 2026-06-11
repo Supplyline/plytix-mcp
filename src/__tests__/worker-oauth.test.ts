@@ -283,7 +283,7 @@ describe('OAuth authorization-code flow (encryption + TTL + PKCE)', () => {
       expires_in: number;
     };
     expect(tokenBody.token_type).toBe('bearer');
-    expect(tokenBody.expires_in).toBe(60 * 60 * 24 * 30);
+    expect(tokenBody.expires_in).toBe(60 * 60 * 24 * 7); // 7-day default TTL
 
     // Token record: encrypted blob, no plaintext, and a bounded TTL.
     const tokenRecord = kv.store.get(`token:${tokenBody.access_token}`) as string;
@@ -291,7 +291,7 @@ describe('OAuth authorization-code flow (encryption + TTL + PKCE)', () => {
     expect(tokenRecord).not.toContain(API_KEY);
     expect(tokenRecord).not.toContain(API_PASSWORD);
     const tokenPut = kv.putCalls.find((c) => c.key === `token:${tokenBody.access_token}`);
-    expect(tokenPut?.opts?.expirationTtl).toBe(60 * 60 * 24 * 30);
+    expect(tokenPut?.opts?.expirationTtl).toBe(60 * 60 * 24 * 7);
 
     // Code is one-time use (deleted on redemption).
     expect(kv.store.has(`code:${code}`)).toBe(false);
@@ -415,5 +415,196 @@ describe('MCP auth gate with OAuth tokens', () => {
     // The decrypted credentials let the request past the auth gate, so it must
     // NOT be the -32600 "Authentication required" 401.
     expect(res.status).not.toBe(401);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Abuse hardening: registration validation, consent context,
+// rate limiting, configurable token TTL
+// ─────────────────────────────────────────────────────────────
+
+describe('OAuth registration validation', () => {
+  it('rejects dangerous redirect_uri schemes at registration', async () => {
+    const env = makeEnv(makeKV());
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: ['javascript:alert(1)'] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('invalid_client_metadata');
+  });
+
+  it('rejects a non-array redirect_uris', async () => {
+    const env = makeEnv(makeKV());
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: 'https://claude.ai/cb' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts http://localhost redirect for local development', async () => {
+    const env = makeEnv(makeKV());
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: ['http://localhost:3000/cb'] }),
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it('truncates client_name to 100 characters', async () => {
+    const env = makeEnv(makeKV());
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        redirect_uris: [REGISTERED_REDIRECT],
+        client_name: 'x'.repeat(300),
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_name: string };
+    expect(body.client_name).toHaveLength(100);
+  });
+});
+
+describe('Consent page context', () => {
+  it('shows the client name and redirect host on the authorize form', async () => {
+    const kv = makeKV();
+    const env = makeEnv(kv);
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        redirect_uris: [REGISTERED_REDIRECT],
+        client_name: 'My Test App',
+      }),
+    });
+    const { client_id } = (await res.json()) as { client_id: string };
+
+    const challenge = await s256('verifier-consent');
+    const page = await call(
+      env,
+      `/authorize?response_type=code&client_id=${client_id}&redirect_uri=${encodeURIComponent(
+        REGISTERED_REDIRECT
+      )}&code_challenge=${challenge}&code_challenge_method=S256`
+    );
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('My Test App');
+    expect(html).toContain('claude.ai'); // redirect destination host
+  });
+
+  it('escapes HTML in the client name (attacker-controlled input)', async () => {
+    const kv = makeKV();
+    const env = makeEnv(kv);
+    const res = await call(env, '/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        redirect_uris: [REGISTERED_REDIRECT],
+        client_name: '<script>alert(1)</script>',
+      }),
+    });
+    const { client_id } = (await res.json()) as { client_id: string };
+
+    const challenge = await s256('verifier-xss');
+    const page = await call(
+      env,
+      `/authorize?response_type=code&client_id=${client_id}&redirect_uri=${encodeURIComponent(
+        REGISTERED_REDIRECT
+      )}&code_challenge=${challenge}&code_challenge_method=S256`
+    );
+    const html = await page.text();
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+});
+
+describe('OAuth rate limiting', () => {
+  it('rate limits POST /authorize per IP (10 per window) and isolates other IPs', async () => {
+    const env = makeEnv(makeKV());
+    const post = (ip: string) =>
+      call(env, '/authorize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'CF-Connecting-IP': ip,
+        },
+        body: new URLSearchParams({ client_id: 'nope', redirect_uri: 'https://x.test/cb' }).toString(),
+      });
+
+    for (let i = 0; i < 10; i++) {
+      const res = await post('203.0.113.1');
+      expect(res.status).toBe(400); // invalid client, but not rate limited
+    }
+    const eleventh = await post('203.0.113.1');
+    expect(eleventh.status).toBe(429);
+    expect(eleventh.headers.get('Retry-After')).toBeTruthy();
+
+    const otherIp = await post('203.0.113.2');
+    expect(otherIp.status).toBe(400); // different IP unaffected
+  });
+
+  it('rate limits POST /register per IP (10 per hour)', async () => {
+    const env = makeEnv(makeKV());
+    const register = () =>
+      call(env, '/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.7' },
+        body: JSON.stringify({ redirect_uris: [REGISTERED_REDIRECT] }),
+      });
+
+    for (let i = 0; i < 10; i++) {
+      expect((await register()).status).toBe(201);
+    }
+    expect((await register()).status).toBe(429);
+  });
+});
+
+describe('Configurable token TTL', () => {
+  it('honors OAUTH_TOKEN_TTL_SECONDS (clamped) on issued tokens', async () => {
+    stubPlytixOk();
+    const kv = makeKV();
+    const env = makeEnv(kv, { OAUTH_TOKEN_TTL_SECONDS: '7200' });
+    const clientId = await registerClient(env, [REGISTERED_REDIRECT]);
+    const verifier = 'verifier-ttl-override-abcdefghijk';
+    const challenge = await s256(verifier);
+
+    const authRes = await call(
+      env,
+      '/authorize',
+      form({
+        client_id: clientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        api_key: API_KEY,
+        api_password: API_PASSWORD,
+      })
+    );
+    expect(authRes.status).toBe(302);
+    const code = new URL(authRes.headers.get('Location') as string).searchParams.get(
+      'code'
+    ) as string;
+
+    const tokenRes = await call(
+      env,
+      '/token',
+      form({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier: verifier,
+        client_id: clientId,
+        redirect_uri: REGISTERED_REDIRECT,
+      })
+    );
+    expect(tokenRes.status).toBe(200);
+    const body = (await tokenRes.json()) as { expires_in: number };
+    expect(body.expires_in).toBe(7200);
   });
 });
