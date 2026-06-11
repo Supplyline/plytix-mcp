@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi, afterEach } from 'vitest';
@@ -9,6 +9,7 @@ import { readBatchManifest } from '../batch/manifest.js';
 import { executeBatchUpdate, type BatchUpdateOperations } from '../batch/runner.js';
 import {
   STDIO_INLINE_MAX_BYTES,
+  parsePlytixErrors,
   validateBatchItems,
 } from '../batch/helpers.js';
 import {
@@ -545,5 +546,116 @@ describe('worker batch-update surface', () => {
 
     expect(toolNames).toContain('products_batch_update');
     expect(toolNames).not.toContain('products_batch_update_manifest');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Review follow-ups (2026-06-10): contractually-required cases
+// from the SPEC's Testing section that were missing.
+// ─────────────────────────────────────────────────────────────
+
+describe('parsePlytixErrors shapes', () => {
+  it('parses a single-message { error: { msg } } body', () => {
+    const err = new PlytixError('Request failed', 400, '{"error":{"msg":"bad attribute"}}');
+    expect(parsePlytixErrors(err)).toEqual([{ msg: 'bad attribute' }]);
+  });
+
+  it('falls back to Error.message for plain errors', () => {
+    expect(parsePlytixErrors(new Error('socket hang up'))).toEqual([
+      { msg: 'socket hang up' },
+    ]);
+  });
+
+  it('falls back to a generic message for opaque throws', () => {
+    expect(parsePlytixErrors('boom')).toEqual([{ msg: 'Unknown Plytix error' }]);
+  });
+});
+
+describe('batch manifest read failures', () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it('surfaces a clear error for a missing manifest file', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'plytix-batch-'));
+    await expect(readBatchManifest(join(tempDir, 'missing.json'))).rejects.toThrow(
+      /ENOENT|no such file/
+    );
+  });
+
+  it('rejects malformed JSON without echoing file contents', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'plytix-batch-'));
+    const path = join(tempDir, 'broken.json');
+    await writeFile(path, '{ this is not json', 'utf8');
+    await expect(readBatchManifest(path)).rejects.toThrow('valid JSON');
+  });
+
+  it('rejects manifests whose items field is not an array', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'plytix-batch-'));
+    const path = join(tempDir, 'items.json');
+    await writeFile(path, JSON.stringify({ schema_version: 1, items: {} }), 'utf8');
+    await expect(readBatchManifest(path)).rejects.toThrow('items must be an array');
+  });
+
+  it('rejects oversized manifest files before parsing (32 MB cap)', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'plytix-batch-'));
+    const path = join(tempDir, 'big.json');
+    await writeFile(path, '{}', 'utf8');
+    // Sparse-extend past the cap; the size check must fire before any parse.
+    await truncate(path, 32 * 1024 * 1024 + 1);
+    await expect(readBatchManifest(path)).rejects.toThrow('max is');
+  });
+});
+
+describe('worker batch-update caps', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a 51-item batch via the worker handler without any Plytix call', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('network must not be called for a cap rejection');
+      })
+    );
+
+    const items = Array.from({ length: 51 }, (_, index) => ({
+      product_id: `product-${index}`,
+      label: 'X',
+    }));
+
+    const response = await worker.fetch(
+      new Request('https://mcp.example.com/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test-key:test-pass',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'products_batch_update', arguments: { items } },
+        }),
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      {} as any
+    );
+
+    const body = (await response.json()) as {
+      result: { isError?: boolean; content: Array<{ text: string }> };
+    };
+    const payload = JSON.parse(body.result.content[0].text) as {
+      status: string;
+      failures: unknown[];
+    };
+    expect(payload.status).toBe('rejected');
+    expect(JSON.stringify(payload.failures)).toContain('50');
   });
 });

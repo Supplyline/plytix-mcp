@@ -356,6 +356,8 @@ export function rejectedResult(
       total,
       succeeded: 0,
       failed: failures.length,
+      // Conservative: a rejected batch patches nothing, so every row counts as
+      // skipped — including rows that also appear in failures[].
       skipped: total,
     },
     failures,

@@ -363,7 +363,9 @@ async function exportBySkus(
 ): Promise<void> {
   const bySku = new Map<string, PlytixProduct[]>();
   const attributes = input.attributes ? Array.from(new Set(['sku', ...input.attributes])) : ['sku'];
-  const chunkSize = input.pageSize;
+  // SPEC: "Resolve SKUs in chunks of 100" — chunking is fixed at the maximum,
+  // independent of the caller's page_size (which only governs result paging).
+  const chunkSize = MAX_EXPORT_PAGE_SIZE;
 
   for (let i = 0; i < input.skus.length; i += chunkSize) {
     const batch = input.skus.slice(i, i + chunkSize);
@@ -374,7 +376,7 @@ async function exportBySkus(
       const result = await searchProductsWithRetry(ops, {
         filters: [[{ field: 'sku', operator: 'in', value: batch }]],
         attributes,
-        pagination: { page, page_size: chunkSize },
+        pagination: { page, page_size: input.pageSize },
       });
 
       state.pagesRead += 1;
@@ -899,6 +901,9 @@ function normalizePositiveInt(
     failures.push(
       makeFailure('batch_export', 'validation', `${field} must be <= ${max}`, field)
     );
+    // The pushed failure rejects the call before any export runs; clamp the
+    // return value anyway so an over-limit number can never leak into a run.
+    return max;
   }
   return value as number;
 }
