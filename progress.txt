@@ -3,6 +3,50 @@ PROGRESS LOG — plytix-mcp
 Session handoff notes. Newest entry on top.
 
 
+2026-06-10/11 — Overnight /improve run: audit → pressure-test → 3 PRs
+----------------------------------------------------------------------
+Goal (Eric, going to bed): run /improve, pressure-test every finding + the
+bulk spec/change-order, write plans, fix/implement as far as possible.
+
+PROCESS LESSON (saved to agent memory): the audit started against a local
+main that was 4 commits BEHIND origin — the batch update/export feature
+(PRs #24–#27, v0.3.0–0.3.3) had already shipped the day before. Everything
+was reconciled mid-run. Always `git fetch` + check open PRs before auditing.
+
+Open PRs for morning review (all CI-green at time of writing, independent,
+any merge order; see each PR body for vetting notes):
+- PR #28 fix/stdio-client-hardening — ports worker client hardening to the
+  stdio client (pagination cap, batched+deduped attribute cache, failure
+  threshold), lookup cfg undefined fix, CI worker typecheck, 9 client tests.
+- PR #29 feat/oauth-abuse-hardening — KV rate limits on /authorize,
+  /register, /token; redirect_uri scheme validation at registration; consent
+  page shows client_name + redirect host; token TTL 30d → 7d default
+  (OAUTH_TOKEN_TTL_SECONDS); timing-safe PKCE compare; 9 new OAuth tests.
+- PR #30 fix/batch-review-findings — post-ship review of the batch feature
+  (2 parallel reviewers vs SPECs + ETL handoff): SKU chunking fixed to
+  spec'd 100 (was page_size-sized), normalizePositiveInt clamps, dry-run
+  skipped count fixed, version constants synced to 0.3.3, ~10 contractual
+  tests added (manifest read failures, worker caps, error-parser shapes,
+  byte-cap rejection). Also: REST-EVIDENCE addendum, handoff doc tracked,
+  plans/ directory (audit record + queued plans 004/005/006).
+
+Bulk/batch spec pressure-test verdict: the shipped batch design already
+resolved every amendment derived from the ETL handoff (both-keys items,
+manifest-from-disk, dry-run, per-sku failures, no job handles). New
+evidence: official Postman collection has NO bulk endpoints; /api/v1/jobs/*
+EXISTS but is 403 permission-gated for this account's API credential —
+if the async path is ever pursued, enable that permission first.
+
+Queued plans (plans/README.md): 004 unify dual-surface core (L), 005
+attribute-cache N+1 collapse (S), 006 deps refresh (S). Rejected-findings
+ledger in plans/README.md prevents re-auditing dead ends (CSRF on
+/authorize, products_get_full "bloat", README tool counts, etc.).
+
+Operator items before the 620-SKU LMI-PD push: 4-SKU live batch
+verification (SPEC "Live verification"), then the manifest run via
+products_batch_update_manifest (dry_run first).
+
+
 2026-06-01 — "Could not attach to MCP server plytix" investigation + hardening
 ------------------------------------------------------------------------------
 Trigger: after a reboot, Claude (Desktop) showed "Could not attach to MCP server plytix".
