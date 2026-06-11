@@ -174,12 +174,15 @@ export async function executeBatchUpdate(
           )
         : [];
     const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
+    const dryRunFailures = [...failures, ...guardFailures];
 
     return finishedResult({
       total,
       succeeded: 0,
-      failures: [...failures, ...guardFailures],
-      skipped: total,
+      failures: dryRunFailures,
+      // Failed rows are not also "skipped": skipped counts only the rows that
+      // would have been patched, so failed + skipped === total in a dry run.
+      skipped: total - dryRunFailures.length,
       dryRun: true,
       metadata: options.metadata,
     });

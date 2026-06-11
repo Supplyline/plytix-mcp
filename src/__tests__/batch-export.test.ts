@@ -293,3 +293,67 @@ describe('worker batch export surface', () => {
     expect(toolNames).not.toContain('products_batch_export_to_file');
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// Review follow-ups (2026-06-10)
+// ─────────────────────────────────────────────────────────────
+
+describe('sku resolution chunking', () => {
+  it('chunks SKU filters at 100 regardless of the caller page_size', async () => {
+    const filterChunkSizes: number[] = [];
+    const pageSizes: Array<number | undefined> = [];
+    const ops = makeOps({
+      search: async (body) => {
+        const group = body.filters?.[0] as Array<{ value: unknown }> | undefined;
+        const skus = (group?.[0]?.value as string[]) ?? [];
+        filterChunkSizes.push(skus.length);
+        pageSizes.push(body.pagination?.page_size);
+        return {
+          data: skus.map((sku) => ({ id: `id-${sku}`, sku })),
+          pagination: {
+            page: body.pagination?.page ?? 1,
+            page_size: body.pagination?.page_size ?? 100,
+            total: skus.length,
+            pages: 1,
+          },
+        };
+      },
+    });
+
+    const skus = Array.from({ length: 150 }, (_, index) => `SKU-${index}`);
+    const result = await executeBatchExport(
+      ops,
+      { mode: 'skus', skus, page_size: 10 },
+      { mode: 'inline', maxRows: 250, maxResponseBytes: 10 * 1024 * 1024 }
+    );
+
+    expect(result.status).toBe('finished');
+    // SPEC: "Resolve SKUs in chunks of 100" — two chunks (100 + 50), even
+    // though the caller asked for page_size 10 (which governs paging only).
+    expect(filterChunkSizes).toEqual([100, 50]);
+    expect(pageSizes.every((size) => size === 10)).toBe(true);
+  });
+});
+
+describe('inline byte cap', () => {
+  it('rejects an inline export whose serialized response exceeds the byte cap, with no row echo', async () => {
+    const ops = makeOps({
+      search: async () => ({
+        data: [{ id: '1', label: 'x'.repeat(2000) }],
+        pagination: { page: 1, page_size: 100, total: 1, pages: 1 },
+      }),
+    });
+
+    const result = await executeBatchExport(
+      ops,
+      { mode: 'search', filters: searchFilter, max_rows: 1 },
+      { mode: 'inline', maxRows: 5, maxResponseBytes: 512 }
+    );
+
+    expect(result.status).toBe('rejected');
+    expect(result.summary.limit_reason).toBe('inline_byte_cap');
+    // The rejection must not echo row payloads.
+    expect(result.products ?? []).toHaveLength(0);
+    expect(JSON.stringify(result.failures)).not.toContain('xxxx');
+  });
+});

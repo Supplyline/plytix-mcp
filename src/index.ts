@@ -20,7 +20,7 @@ import { registerIdentifierTools } from './tools/identifier.js';
 import { registerProductAttributeTools } from './tools/product-attributes.js';
 import { registerRelationshipTools } from './tools/relationships.js';
 
-const VERSION = '0.2.2';
+const VERSION = '0.3.3';
 
 function printUsage(): void {
   process.stdout.write(
