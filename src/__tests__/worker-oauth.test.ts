@@ -419,6 +419,100 @@ describe('MCP auth gate with OAuth tokens', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// JSON-RPC notification handling (streamable-HTTP transport)
+// ─────────────────────────────────────────────────────────────
+
+describe('MCP notification handling', () => {
+  // Per the MCP streamable-HTTP spec, notifications (no `id` member) must be
+  // acknowledged with 202 Accepted and an empty body — never a JSON-RPC
+  // response object. Responding `{"id":null,"result":{}}` breaks strict
+  // clients: Codex's rmcp transport fails to deserialize it and drops the
+  // connection.
+  it('answers notifications/initialized with 202 and an empty body', async () => {
+    const env = makeEnv(makeKV());
+
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    });
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe('');
+  });
+
+  it('answers an all-notification batch with 202 and an empty body', async () => {
+    const env = makeEnv(makeKV());
+
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', method: 'notifications/cancelled' },
+      ]),
+    });
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe('');
+  });
+
+  it('omits notifications from a mixed batch response', async () => {
+    const env = makeEnv(makeKV());
+
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', id: 7, method: 'tools/list' },
+      ]),
+    });
+
+    expect(res.status).toBe(200);
+    const responses = (await res.json()) as Array<{ id: number }>;
+    expect(responses).toHaveLength(1);
+    expect(responses[0].id).toBe(7);
+  });
+
+  it('does not treat a malformed no-id message as a notification', async () => {
+    const env = makeEnv(makeKV());
+
+    // No `id` AND no `method` — not a valid notification. Must produce an
+    // error response, not a silent 202.
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0' }),
+    });
+
+    expect(res.status).not.toBe(202);
+    const json = (await res.json()) as { error?: { code: number } };
+    expect(json.error).toBeDefined();
+  });
+
+  it('still answers a ping request (has an id) with a result', async () => {
+    stubPlytixOk();
+    const env = makeEnv(makeKV());
+
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Plytix-API-Key': API_KEY,
+        'X-Plytix-API-Password': API_PASSWORD,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping', params: {} }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { id: number; result: unknown };
+    expect(json.id).toBe(3);
+    expect(json.result).toEqual({});
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
 // Abuse hardening: registration validation, consent context,
 // rate limiting, configurable token TTL
 // ─────────────────────────────────────────────────────────────
