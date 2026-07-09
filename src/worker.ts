@@ -3166,8 +3166,14 @@ export default {
       // from the auth gate below: they carry no response, so there is
       // nothing to protect, and this server processes no notification
       // side effects.
+      // A notification requires a `method`; a no-id object WITHOUT one is a
+      // malformed request and must fall through to the handler so the client
+      // gets an error response instead of a silent 202.
       const isNotification = (req: JsonRpcRequest) =>
-        req !== null && typeof req === 'object' && !('id' in req);
+        req !== null &&
+        typeof req === 'object' &&
+        !('id' in req) &&
+        typeof req.method === 'string';
 
       if (!Array.isArray(body) && isNotification(body)) {
         return new Response(null, { status: 202, headers: corsHeaders });

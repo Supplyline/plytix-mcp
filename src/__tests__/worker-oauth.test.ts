@@ -475,6 +475,22 @@ describe('MCP notification handling', () => {
     expect(responses[0].id).toBe(7);
   });
 
+  it('does not treat a malformed no-id message as a notification', async () => {
+    const env = makeEnv(makeKV());
+
+    // No `id` AND no `method` — not a valid notification. Must produce an
+    // error response, not a silent 202.
+    const res = await call(env, '/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0' }),
+    });
+
+    expect(res.status).not.toBe(202);
+    const json = (await res.json()) as { error?: { code: number } };
+    expect(json.error).toBeDefined();
+  });
+
   it('still answers a ping request (has an id) with a result', async () => {
     stubPlytixOk();
     const env = makeEnv(makeKV());
