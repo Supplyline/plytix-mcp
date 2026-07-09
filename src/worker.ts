@@ -3157,9 +3157,29 @@ export default {
         );
       }
 
-      // Methods that don't require authentication (for MCP client discovery)
+      // JSON-RPC notifications (no `id` member) MUST NOT receive a response
+      // object. Answering them with `{"id":null,"result":{}}` breaks strict
+      // clients — Codex's rmcp transport fails to deserialize it and drops
+      // the connection ("data did not match any variant of untagged enum
+      // JsonRpcMessage"). Per the MCP streamable-HTTP spec, acknowledge
+      // notifications with 202 Accepted and an empty body. They are exempt
+      // from the auth gate below: they carry no response, so there is
+      // nothing to protect, and this server processes no notification
+      // side effects.
+      const isNotification = (req: JsonRpcRequest) =>
+        req !== null && typeof req === 'object' && !('id' in req);
+
+      if (!Array.isArray(body) && isNotification(body)) {
+        return new Response(null, { status: 202, headers: corsHeaders });
+      }
+
+      // Methods that don't require authentication (for MCP client discovery).
+      // Notifications are excluded from the gate check — they never produce
+      // a response, so an all-notification batch must not 401.
       const publicMethods = ['initialize', 'notifications/initialized', 'tools/list'];
-      const requests = Array.isArray(body) ? body : [body];
+      const requests = (Array.isArray(body) ? body : [body]).filter(
+        (req) => !isNotification(req)
+      );
       const allPublic = requests.every(
         (req) => req && typeof req === 'object' && typeof req.method === 'string' && publicMethods.includes(req.method)
       );
@@ -3253,7 +3273,8 @@ export default {
         }
       }
 
-      // Handle batch requests
+      // Handle batch requests (notifications already filtered out of
+      // `requests`; they get no response entry)
       if (Array.isArray(body)) {
         if (body.length > 50) {
           return new Response(
@@ -3265,15 +3286,20 @@ export default {
             { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
           );
         }
+        // All-notification batch: nothing to respond to.
+        if (requests.length === 0) {
+          return new Response(null, { status: 202, headers: corsHeaders });
+        }
         const responses = await Promise.all(
-          body.map((req) => handleMcpRequest(req, client))
+          requests.map((req) => handleMcpRequest(req, client))
         );
         return new Response(JSON.stringify(responses), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
       }
 
-      // Handle single request
+      // Handle single request (single notifications were acknowledged with
+      // 202 before the auth gate)
       const response = await handleMcpRequest(body, client);
       return new Response(JSON.stringify(response), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
