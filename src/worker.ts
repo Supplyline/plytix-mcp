@@ -151,6 +151,10 @@ function getCorsHeaders(request: Request): Record<string, string> {
     'Access-Control-Allow-Headers':
       'Content-Type, X-Plytix-API-Key, X-Plytix-API-Password, Authorization, ' +
       'MCP-Protocol-Version, Mcp-Method, Mcp-Name',
+    // `MCP-Protocol-Version` is not a CORS-safelisted response header, so
+    // without this a browser transport cannot read the version we answered
+    // with — even though we allow it on the way in and emit it on the way out.
+    'Access-Control-Expose-Headers': 'MCP-Protocol-Version',
     'Access-Control-Max-Age': '86400',
   };
 

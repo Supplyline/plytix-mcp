@@ -228,6 +228,59 @@ describe('validateModernRequest', () => {
     });
   });
 
+  it('requires Mcp-Name on tools/call even when the body omits params.name', () => {
+    // Requirement follows the method. Deriving it from the body let a
+    // malformed tools/call skip header validation and come back from the
+    // dispatcher as an "unknown tool" instead.
+    const body = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/call',
+      params: {
+        arguments: {},
+        _meta: {
+          [META_PROTOCOL_VERSION]: MODERN_PROTOCOL_VERSION,
+          [META_CLIENT_CAPABILITIES]: {},
+        },
+      },
+    };
+    expect(expectedNameHeader(body)).toBeUndefined();
+    expect(
+      validateModernRequest(
+        body,
+        headersOf({
+          'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+          'Mcp-Method': 'tools/call',
+        })
+      )
+    ).toMatchObject({ ok: false, status: 400, error: { code: ERROR_HEADER_MISMATCH } });
+  });
+
+  it('rejects tools/call whose params.name is not a string', () => {
+    const body = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 42,
+        _meta: {
+          [META_PROTOCOL_VERSION]: MODERN_PROTOCOL_VERSION,
+          [META_CLIENT_CAPABILITIES]: {},
+        },
+      },
+    };
+    expect(
+      validateModernRequest(
+        body,
+        headersOf({
+          'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+          'Mcp-Method': 'tools/call',
+          'Mcp-Name': '42',
+        })
+      )
+    ).toMatchObject({ ok: false, status: 400, error: { code: ERROR_HEADER_MISMATCH } });
+  });
+
   it('does not require Mcp-Name on methods that have no name to mirror', () => {
     const body = modernBody('tools/list');
     expect(expectedNameHeader(body)).toBeUndefined();
@@ -696,6 +749,23 @@ describe('worker: removed transport mechanics', () => {
     const res = await worker.fetch(new Request(`${ORIGIN}/mcp`, { method }), ENV);
     expect(res.status).toBe(405);
     expect(res.headers.get('Allow')).toContain('POST');
+  });
+
+  it('exposes MCP-Protocol-Version to browser clients via CORS', async () => {
+    // Not a CORS-safelisted response header: without Expose-Headers a browser
+    // transport cannot read the version we answered with.
+    const body = modernBody('tools/list');
+    const res = await worker.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: 'POST',
+        headers: { ...modernHeaders(body), Origin: 'https://claude.ai' },
+        body: JSON.stringify(body),
+      }),
+      ENV
+    );
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://claude.ai');
+    expect(res.headers.get('Access-Control-Expose-Headers')).toContain('MCP-Protocol-Version');
+    expect(res.headers.get('MCP-Protocol-Version')).toBe(MODERN_PROTOCOL_VERSION);
   });
 
   it('ignores Mcp-Session-Id rather than minting or echoing one', async () => {

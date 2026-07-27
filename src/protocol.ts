@@ -200,11 +200,24 @@ function headerMismatch(message: string): ModernValidation {
 }
 
 /**
+ * Which body field a method's `Mcp-Name` header mirrors, or undefined when the
+ * method does not use the header.
+ *
+ * Applicability is a property of the *method* — `Mcp-Name` is required for
+ * `tools/call`, `resources/read` and `prompts/get` regardless of whether the
+ * body happens to carry a usable value. Deriving it from the body instead
+ * would let a malformed `tools/call` skip header validation entirely.
+ */
+export function nameHeaderField(method: string | undefined): 'name' | 'uri' | undefined {
+  return method ? NAME_HEADER_METHODS[method] : undefined;
+}
+
+/**
  * The value a request's `Mcp-Name` header must mirror, or undefined when the
- * method does not use one.
+ * method does not use one or the body has no usable value to mirror.
  */
 export function expectedNameHeader(request: ProtocolRequest): string | undefined {
-  const field = request.method ? NAME_HEADER_METHODS[request.method] : undefined;
+  const field = nameHeaderField(request.method);
   if (!field) return undefined;
   const value = request.params?.[field];
   return typeof value === 'string' ? value : undefined;
@@ -246,15 +259,24 @@ export function validateModernRequest(
     );
   }
 
-  const expectedName = expectedNameHeader(request);
-  if (expectedName !== undefined) {
+  // Requirement follows the method, not the body: a `tools/call` missing its
+  // `name` must fail header validation rather than slip through to the
+  // dispatcher and come back as an "unknown tool".
+  const nameField = nameHeaderField(request.method);
+  if (nameField) {
     const nameHeader = headers.get('Mcp-Name');
     if (!nameHeader) {
       return headerMismatch('Missing required header: Mcp-Name');
     }
-    if (decodeHeaderValue(nameHeader) !== expectedName) {
+    const bodyValue = request.params?.[nameField];
+    if (typeof bodyValue !== 'string') {
       return headerMismatch(
-        `Header mismatch: Mcp-Name header value '${nameHeader}' does not match body value '${expectedName}'`
+        `Header mismatch: Mcp-Name header value '${nameHeader}' has no matching string '${nameField}' in the request body`
+      );
+    }
+    if (decodeHeaderValue(nameHeader) !== bodyValue) {
+      return headerMismatch(
+        `Header mismatch: Mcp-Name header value '${nameHeader}' does not match body value '${bodyValue}'`
       );
     }
   }
