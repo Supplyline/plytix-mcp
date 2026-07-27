@@ -201,7 +201,37 @@ Related fields:
 
 ## Session Notes
 
-_Last updated: 2026-03-11_
+_Last updated: 2026-07-27_
+
+### MCP 2026-07-28 conformance (worker)
+
+`src/protocol.ts` holds the version/era logic; `src/worker.ts` wires it into the
+endpoint. The worker is **dual-era** — the `2026-07-28` revision removed the
+`initialize` handshake and `Mcp-Session-Id`, but shipping clients still use them,
+so both are served on one endpoint.
+
+- Era is detected by **shape, not version value**: presence of the
+  `io.modelcontextprotocol/protocolVersion` `_meta` key (a key legacy clients never
+  emit), or an `MCP-Protocol-Version` header naming a non-legacy version. This is
+  what lets a *future* client reach the modern path and renegotiate via `-32022`
+  instead of being silently downgraded.
+- Modern path only: mirrored-header validation (`-32020`), required `_meta`
+  (`-32602`), unknown method → `404`/`-32601` *before* the auth gate, and
+  `resultType` + `serverInfo` stamped on results. Legacy responses are deliberately
+  left byte-identical so an upgrade can't perturb a connected client.
+- `clientExtensions()` is the negotiation seam for MCP Apps (`io.modelcontextprotocol/ui`)
+  and Tasks (`io.modelcontextprotocol/tasks`) — both are advertised in per-request
+  capabilities, so extension work builds on this.
+- Deprecated by the RC but unused here: Roots, Sampling, Logging. Error `-32002` is
+  retired in favour of `-32602` (we never emitted it).
+
+**Stdio is still legacy** and cannot move yet: it delegates the protocol to
+`@modelcontextprotocol/sdk`, whose latest (1.29.0) tops out at `2025-11-25`. When the
+SDK ships `2026-07-28` this becomes a dependency bump, not hand-rolled work.
+
+Not yet done (tracked separately): CIMD client registration (DCR is now formally
+deprecated), `iss` on authorization responses per RFC 9207, and the RFC 8707
+`resource` parameter.
 
 ### Recent Changes
 - Added variant lifecycle tools: `variants_create`, `variants_link`, `variants_unlink`
