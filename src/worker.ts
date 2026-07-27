@@ -19,6 +19,35 @@ import {
   WORKER_EXPORT_INLINE_MAX_BYTES,
   WORKER_EXPORT_INLINE_MAX_ROWS,
 } from './batch/export.js';
+import {
+  ERROR_METHOD_NOT_FOUND,
+  MODERN_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  decorateModernResult,
+  isModernRequest,
+  negotiateLegacyVersion,
+  validateModernRequest,
+} from './protocol.js';
+
+/** Self-reported identity, echoed in `initialize`, `server/discover` and modern results. */
+const SERVER_INFO = { name: 'plytix-mcp', version: '0.3.3' } as const;
+
+/**
+ * Every JSON-RPC method this server implements.
+ *
+ * Used on the modern path to answer an unimplemented method with `404` before
+ * the auth gate: a method that does not exist has nothing to protect, and the
+ * spec requires the `404` + `-32601` pair so a dual-era client can tell a
+ * modern server apart from a legacy endpoint that does not host this path.
+ */
+const IMPLEMENTED_METHODS = new Set([
+  'initialize',
+  'server/discover',
+  'tools/list',
+  'tools/call',
+  'notifications/initialized',
+  'ping',
+]);
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -116,7 +145,12 @@ function getCorsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get('Origin') || '';
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Plytix-API-Key, X-Plytix-API-Password, Authorization',
+    // `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` are the request
+    // metadata the Streamable HTTP transport mirrors into headers; browser
+    // clients cannot send them unless they are allowed here.
+    'Access-Control-Allow-Headers':
+      'Content-Type, X-Plytix-API-Key, X-Plytix-API-Password, Authorization, ' +
+      'MCP-Protocol-Version, Mcp-Method, Mcp-Name',
     'Access-Control-Max-Age': '86400',
   };
 
@@ -2552,19 +2586,41 @@ async function handleMcpRequest(
 
   try {
     switch (method) {
+      // Legacy (handshake-based) entry point. Modern clients never send this;
+      // they declare their version per-request in `_meta` instead. Echo the
+      // requested version when we support it, per the legacy lifecycle rules —
+      // the previous hardcoded `2024-11-05` downgraded every client that asked
+      // for something newer.
       case 'initialize': {
         return {
           jsonrpc: '2.0',
           id: id ?? null,
           result: {
-            protocolVersion: '2024-11-05',
+            protocolVersion: negotiateLegacyVersion(params?.protocolVersion),
             capabilities: {
               tools: {},
             },
-            serverInfo: {
-              name: 'plytix-mcp',
-              version: '0.3.3',
+            serverInfo: SERVER_INFO,
+          },
+        };
+      }
+
+      // Modern discovery. Servers MUST implement this; clients MAY call it to
+      // learn supported versions and capabilities before anything else, and
+      // stdio clients use it as the era probe.
+      case 'server/discover': {
+        return {
+          jsonrpc: '2.0',
+          id: id ?? null,
+          result: {
+            supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
+            capabilities: {
+              tools: {},
             },
+            instructions:
+              'Plytix PIM access: look up products by any identifier, read families, ' +
+              'attributes, assets, categories, variants and relationships, and apply ' +
+              'guarded single or batch writes.',
           },
         };
       }
@@ -2668,6 +2724,34 @@ async function handleMcpRequest(
       },
     };
   }
+}
+
+/**
+ * Serialise a modern-era response.
+ *
+ * Results are stamped with `resultType` and the server's identity. An unknown
+ * method becomes `404` (with the JSON-RPC `-32601` body intact) so a dual-era
+ * client can distinguish a modern server that lacks the method from a legacy
+ * endpoint that does not host this path at all.
+ */
+function modernResponse(
+  response: JsonRpcResponse,
+  corsHeaders: Record<string, string>
+): Response {
+  const status = response.error?.code === ERROR_METHOD_NOT_FOUND ? 404 : 200;
+  const body: JsonRpcResponse =
+    response.result !== undefined
+      ? { ...response, result: decorateModernResult(response.result, SERVER_INFO) }
+      : response;
+
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+      ...corsHeaders,
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3112,6 +3196,28 @@ export default {
       );
     }
 
+    // The 2026-07-28 revision removed the standalone GET stream and the
+    // DELETE session teardown. Answer both explicitly so an older client gets
+    // the documented signal instead of a generic "not found".
+    if (url.pathname === '/mcp' && (request.method === 'GET' || request.method === 'DELETE')) {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32600,
+            message:
+              'This MCP endpoint accepts POST only. Standalone SSE streams and session ' +
+              'teardown were removed in protocol revision 2026-07-28.',
+          },
+        }),
+        {
+          status: 405,
+          headers: { 'Content-Type': 'application/json', Allow: 'POST, OPTIONS', ...corsHeaders },
+        }
+      );
+    }
+
     // MCP endpoint
     if (url.pathname === '/mcp' && request.method === 'POST') {
       // Parse JSON-RPC request first to check if auth is needed
@@ -3179,10 +3285,55 @@ export default {
         return new Response(null, { status: 202, headers: corsHeaders });
       }
 
+      // ── Protocol era ─────────────────────────────────────────────
+      // A request carrying modern per-request `_meta` (or naming the modern
+      // version in its `MCP-Protocol-Version` header) is served under the
+      // 2026-07-28 revision, with its strict header mirroring and HTTP status
+      // codes. Everything else keeps today's legacy behaviour — including
+      // JSON-RPC batches, which the modern transport does not permit at all.
+      let isModern = false;
+      if (!Array.isArray(body)) {
+        isModern = isModernRequest(body, request.headers);
+        if (isModern) {
+          const validation = validateModernRequest(body, request.headers);
+          if (!validation.ok) {
+            return new Response(
+              JSON.stringify({ jsonrpc: '2.0', id: body.id ?? null, error: validation.error }),
+              {
+                status: validation.status,
+                headers: { 'Content-Type': 'application/json', ...corsHeaders },
+              }
+            );
+          }
+
+          // Resolved before the auth gate: an unimplemented method has nothing
+          // to protect, and answering it with 401 would hide the `404`/`-32601`
+          // signal the transport requires here.
+          if (!IMPLEMENTED_METHODS.has(body.method)) {
+            return modernResponse(
+              {
+                jsonrpc: '2.0',
+                id: body.id ?? null,
+                error: {
+                  code: ERROR_METHOD_NOT_FOUND,
+                  message: `Method not found: ${body.method}`,
+                },
+              },
+              corsHeaders
+            );
+          }
+        }
+      }
+
       // Methods that don't require authentication (for MCP client discovery).
       // Notifications are excluded from the gate check — they never produce
       // a response, so an all-notification batch must not 401.
-      const publicMethods = ['initialize', 'notifications/initialized', 'tools/list'];
+      const publicMethods = [
+        'initialize',
+        'server/discover',
+        'notifications/initialized',
+        'tools/list',
+      ];
       const requests = (Array.isArray(body) ? body : [body]).filter(
         (req) => !isNotification(req)
       );
@@ -3307,6 +3458,9 @@ export default {
       // Handle single request (single notifications were acknowledged with
       // 202 before the auth gate)
       const response = await handleMcpRequest(body, client);
+      if (isModern) {
+        return modernResponse(response, corsHeaders);
+      }
       return new Response(JSON.stringify(response), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });

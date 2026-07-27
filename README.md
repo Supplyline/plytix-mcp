@@ -100,6 +100,24 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
 
 The remote worker exposes 46 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
+### Protocol versions
+
+The worker is **dual-era**: it serves both the stateless `2026-07-28` revision and the
+older handshake-based revisions on the same endpoint, choosing per request.
+
+| Client sends | Served as |
+|---|---|
+| `_meta` with `io.modelcontextprotocol/protocolVersion`, or an `MCP-Protocol-Version` header naming a non-legacy version | `2026-07-28` — mirrored-header validation, `server/discover`, `resultType`/`serverInfo` on results, spec HTTP status codes |
+| `initialize` handshake (`2025-11-25` … `2024-11-05`) | Legacy — responses unchanged from previous releases |
+
+A client newer than this server receives `-32022` with the supported list and can
+renegotiate down. The `2026-07-28` transport dropped the standalone `GET` stream and
+`DELETE` teardown, so both now answer `405`; `Mcp-Session-Id` is ignored rather than
+echoed.
+
+The stdio server still speaks the legacy handshake — it delegates the protocol to
+`@modelcontextprotocol/sdk`, which has not yet shipped `2026-07-28`.
+
 ### Local Development
 
 ```bash
