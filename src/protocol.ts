@@ -117,11 +117,41 @@ function readMeta(request: ProtocolRequest): Record<string, unknown> | undefined
 }
 
 /**
- * The protocol version a request declares in `_meta`, if any.
+ * The protocol version a request declares in `_meta`, if it declares a usable
+ * one. A present-but-malformed value reads as absent here; use
+ * {@link hasModernMeta} to ask whether the *key* was sent at all.
  */
 export function bodyProtocolVersion(request: ProtocolRequest): string | undefined {
   const value = readMeta(request)?.[META_PROTOCOL_VERSION];
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Whether a request carries the modern protocol-version `_meta` key at all,
+ * whatever its value.
+ *
+ * Era detection deliberately tests *presence*, not type: handshake-based
+ * revisions never emit this key, so a request carrying it is modern-shaped
+ * even when the value is malformed. Type validation belongs to
+ * {@link validateModernRequest}, which answers with a `400` — classifying such
+ * a request as legacy would instead serve it successfully.
+ */
+export function hasModernMeta(request: ProtocolRequest): boolean {
+  const meta = readMeta(request);
+  return meta !== undefined && META_PROTOCOL_VERSION in meta;
+}
+
+/**
+ * Whether an `MCP-Protocol-Version` header value indicates the modern era.
+ *
+ * Legacy `2025-06-18` and `2025-11-25` clients also send this header, so a
+ * value is only a modern signal when it is not a revision we know to be
+ * legacy. Unknown/future values count as modern so they reach the modern path
+ * and can renegotiate via `-32022`.
+ */
+export function isModernProtocolHeader(value: string | null): boolean {
+  if (!value) return false;
+  return !(LEGACY_PROTOCOL_VERSIONS as readonly string[]).includes(value);
 }
 
 /**
@@ -145,11 +175,24 @@ export function bodyProtocolVersion(request: ProtocolRequest): string | undefine
  *    do not recognise as legacy.
  */
 export function isModernRequest(request: ProtocolRequest, headers: HeaderSource): boolean {
-  if (bodyProtocolVersion(request) !== undefined) return true;
+  return hasModernMeta(request) || isModernProtocolHeader(headers.get('MCP-Protocol-Version'));
+}
 
-  const header = headers.get('MCP-Protocol-Version');
-  if (!header) return false;
-  return !(LEGACY_PROTOCOL_VERSIONS as readonly string[]).includes(header);
+/**
+ * Whether a JSON-RPC *batch* was sent by a modern client.
+ *
+ * The modern transport requires the body of a POST to be a single request or
+ * notification — batches are not permitted. They must therefore be rejected
+ * rather than quietly served under legacy semantics, which would skip the
+ * mirrored-header and `_meta` validation entirely and let a batch assert one
+ * method in its headers while executing another in its body.
+ */
+export function isModernBatch(body: unknown[], headers: HeaderSource): boolean {
+  if (isModernProtocolHeader(headers.get('MCP-Protocol-Version'))) return true;
+  return body.some(
+    (entry) =>
+      entry !== null && typeof entry === 'object' && hasModernMeta(entry as ProtocolRequest)
+  );
 }
 
 function headerMismatch(message: string): ModernValidation {

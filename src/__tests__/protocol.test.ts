@@ -130,6 +130,33 @@ describe('era detection', () => {
     ).toBe(true);
   });
 
+  it('treats a malformed protocolVersion value as modern-shaped, not legacy', () => {
+    // Regression: era detection must key on presence of the key, not on it
+    // holding a usable string. Reading a non-string as "absent" classified the
+    // request legacy and served it a 200 instead of a 400.
+    const malformed = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/list',
+      params: { _meta: { [META_PROTOCOL_VERSION]: 12345, [META_CLIENT_CAPABILITIES]: {} } },
+    };
+    expect(isModernRequest(malformed, headersOf({}))).toBe(true);
+    expect(validateModernRequest(malformed, headersOf({}))).toMatchObject({
+      ok: false,
+      status: 400,
+    });
+  });
+
+  it('treats a null protocolVersion value as modern-shaped', () => {
+    const nulled = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/list',
+      params: { _meta: { [META_PROTOCOL_VERSION]: null, [META_CLIENT_CAPABILITIES]: {} } },
+    };
+    expect(isModernRequest(nulled, headersOf({}))).toBe(true);
+  });
+
   it('treats _meta declaring a legacy version as modern-shaped', () => {
     // The key itself only exists in the modern revision, so its presence is
     // decisive regardless of the value it carries.
@@ -479,6 +506,76 @@ describe('worker: modern era', () => {
     const body = modernBody('tools/call', { name: 'products_lookup', arguments: { identifier: 'X' } });
     const res = await post(body, modernHeaders(body));
     expect(res.status).toBe(401);
+  });
+});
+
+describe('worker: initialize is legacy-only', () => {
+  it('answers a modern-framed initialize with 404, not a decorated handshake', async () => {
+    // The modern revision removed the handshake. Serving it here would hand
+    // the client a "handshake succeeded" result for a method this era does
+    // not define.
+    const body = modernBody('initialize', { protocolVersion: MODERN_PROTOCOL_VERSION });
+    const res = await post(body, modernHeaders(body));
+    expect(res.status).toBe(404);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32601);
+    expect(json.result).toBeUndefined();
+  });
+
+  it('still answers a legacy initialize normally', async () => {
+    const res = await post(
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+      { 'Content-Type': 'application/json' }
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.result.protocolVersion).toBe('2025-11-25');
+  });
+});
+
+describe('worker: modern batches are rejected', () => {
+  it('rejects a batch carrying the modern header with 400', async () => {
+    // Would otherwise fall through to legacy batch handling, skipping
+    // mirrored-header and _meta validation for every entry.
+    const res = await post(
+      [
+        { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+        { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+      ],
+      { 'Content-Type': 'application/json', 'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION }
+    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32600);
+  });
+
+  it('rejects a batch whose entries carry modern _meta even with no header', async () => {
+    const res = await post([modernBody('tools/list')], { 'Content-Type': 'application/json' });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32600);
+  });
+
+  it('still serves a purely legacy batch', async () => {
+    const res = await post(
+      [
+        { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+        { jsonrpc: '2.0', id: 2, method: 'initialize', params: {} },
+      ],
+      { 'Content-Type': 'application/json' }
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json).toHaveLength(2);
+    expect(json[0].result.tools.length).toBeGreaterThan(0);
+  });
+
+  it('still serves a legacy batch that sends a legacy version header', async () => {
+    const res = await post([{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }], {
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': '2025-11-25',
+    });
+    expect(res.status).toBe(200);
   });
 });
 

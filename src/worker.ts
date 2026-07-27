@@ -24,6 +24,7 @@ import {
   MODERN_PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   decorateModernResult,
+  isModernBatch,
   isModernRequest,
   negotiateLegacyVersion,
   validateModernRequest,
@@ -33,21 +34,20 @@ import {
 const SERVER_INFO = { name: 'plytix-mcp', version: '0.3.3' } as const;
 
 /**
- * Every JSON-RPC method this server implements.
+ * Methods dispatchable on the *modern* path.
  *
- * Used on the modern path to answer an unimplemented method with `404` before
- * the auth gate: a method that does not exist has nothing to protect, and the
- * spec requires the `404` + `-32601` pair so a dual-era client can tell a
- * modern server apart from a legacy endpoint that does not host this path.
+ * Used to answer an unimplemented method with `404` before the auth gate: a
+ * method that does not exist has nothing to protect, and the spec requires the
+ * `404` + `-32601` pair so a dual-era client can tell a modern server apart
+ * from a legacy endpoint that does not host this path.
+ *
+ * `initialize` and `notifications/initialized` are deliberately absent — the
+ * modern revision removed the handshake, so serving them here would hand a
+ * client a decorated "handshake succeeded" result for a method this era does
+ * not define. They remain reachable on the legacy path, which never consults
+ * this set.
  */
-const IMPLEMENTED_METHODS = new Set([
-  'initialize',
-  'server/discover',
-  'tools/list',
-  'tools/call',
-  'notifications/initialized',
-  'ping',
-]);
+const MODERN_METHODS = new Set(['server/discover', 'tools/list', 'tools/call', 'ping']);
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -3292,7 +3292,26 @@ export default {
       // codes. Everything else keeps today's legacy behaviour — including
       // JSON-RPC batches, which the modern transport does not permit at all.
       let isModern = false;
-      if (!Array.isArray(body)) {
+      if (Array.isArray(body)) {
+        // The modern transport permits only a single request or notification
+        // per POST. Serving a modern batch under legacy semantics would skip
+        // header/`_meta` validation altogether, so reject it outright.
+        if (isModernBatch(body, request.headers)) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: {
+                code: -32600,
+                message:
+                  'Invalid Request: JSON-RPC batches are not permitted in protocol revision ' +
+                  `${MODERN_PROTOCOL_VERSION}; send one request or notification per POST`,
+              },
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
+      } else {
         isModern = isModernRequest(body, request.headers);
         if (isModern) {
           const validation = validateModernRequest(body, request.headers);
@@ -3309,7 +3328,7 @@ export default {
           // Resolved before the auth gate: an unimplemented method has nothing
           // to protect, and answering it with 401 would hide the `404`/`-32601`
           // signal the transport requires here.
-          if (!IMPLEMENTED_METHODS.has(body.method)) {
+          if (!MODERN_METHODS.has(body.method)) {
             return modernResponse(
               {
                 jsonrpc: '2.0',
