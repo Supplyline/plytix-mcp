@@ -579,6 +579,71 @@ describe('worker: modern batches are rejected', () => {
   });
 });
 
+describe('worker: malformed bodies are rejected, not crashed on', () => {
+  // Each of these parses as valid JSON but is not a JSON-RPC message. Before
+  // the guard they reached era detection or the dispatcher, which dereferenced
+  // them and rejected the Worker promise with a TypeError.
+  it.each([
+    ['null', null],
+    ['a bare string', 'hello'],
+    ['a number', 42],
+    ['a boolean', true],
+  ])('rejects %s with 400 and -32600', async (_label, payload) => {
+    const res = await post(payload, { 'Content-Type': 'application/json' });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32600);
+  });
+
+  it('rejects a batch containing a null entry', async () => {
+    const res = await post([{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, null], {
+      'Content-Type': 'application/json',
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32600);
+  });
+
+  it('rejects a null body sent with modern headers', async () => {
+    const res = await post(null, {
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+      'Mcp-Method': 'tools/list',
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('worker: 404 is reserved for unknown JSON-RPC methods', () => {
+  it('returns 200 for an unknown tool name, since tools/call is implemented', async () => {
+    // -32601 from tools/call means "no such tool", not "no such method".
+    // Mapping it to 404 would tell a client the endpoint lacks tools/call.
+    const body = modernBody('tools/call', { name: 'no_such_tool', arguments: {} });
+    const res = await worker.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: 'POST',
+        headers: {
+          ...modernHeaders(body),
+          'X-Plytix-API-Key': 'k',
+          'X-Plytix-API-Password': 'p',
+        },
+        body: JSON.stringify(body),
+      }),
+      ENV
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.error.code).toBe(-32601);
+    expect(json.error.message).toContain('Unknown tool');
+  });
+
+  it('still returns 404 for a genuinely unknown method', async () => {
+    const body = modernBody('nonexistent/method');
+    const res = await post(body, modernHeaders(body));
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('worker: removed transport mechanics', () => {
   it.each(['GET', 'DELETE'])('answers %s /mcp with 405', async (method) => {
     const res = await worker.fetch(new Request(`${ORIGIN}/mcp`, { method }), ENV);

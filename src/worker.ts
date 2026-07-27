@@ -2727,18 +2727,21 @@ async function handleMcpRequest(
 }
 
 /**
- * Serialise a modern-era response.
+ * Serialise a modern-era response, stamping results with `resultType` and the
+ * server's identity.
  *
- * Results are stamped with `resultType` and the server's identity. An unknown
- * method becomes `404` (with the JSON-RPC `-32601` body intact) so a dual-era
- * client can distinguish a modern server that lacks the method from a legacy
- * endpoint that does not host this path at all.
+ * `status` is supplied by the caller rather than inferred from the error code.
+ * Only the dispatcher knows whether a `-32601` means "this server does not
+ * implement that JSON-RPC method" (`404`, the signal a dual-era client uses to
+ * tell a modern server from an endpoint that does not host this path) or
+ * merely "that tool name does not exist" — which arrives as `-32601` from
+ * `tools/call` but must stay `200`, since `tools/call` itself is implemented.
  */
 function modernResponse(
   response: JsonRpcResponse,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  status = 200
 ): Response {
-  const status = response.error?.code === ERROR_METHOD_NOT_FOUND ? 404 : 200;
   const body: JsonRpcResponse =
     response.result !== undefined
       ? { ...response, result: decorateModernResult(response.result, SERVER_INFO) }
@@ -3263,6 +3266,32 @@ export default {
         );
       }
 
+      // A body can be valid JSON without being a JSON-RPC message: `null`, a
+      // bare string, a number, or a batch containing any of those. Reject it
+      // here with a controlled Invalid Request rather than letting era
+      // detection or the dispatcher dereference it and reject the Worker
+      // promise with a TypeError.
+      const isMessageShaped = (value: unknown): boolean =>
+        value !== null && typeof value === 'object' && !Array.isArray(value);
+
+      if (
+        !isMessageShaped(body) &&
+        !(Array.isArray(body) && body.every((entry) => isMessageShaped(entry)))
+      ) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            error: {
+              code: -32600,
+              message:
+                'Invalid Request: body must be a JSON-RPC request object, or an array of them',
+            },
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
       // JSON-RPC notifications (no `id` member) MUST NOT receive a response
       // object. Answering them with `{"id":null,"result":{}}` breaks strict
       // clients — Codex's rmcp transport fails to deserialize it and drops
@@ -3338,7 +3367,8 @@ export default {
                   message: `Method not found: ${body.method}`,
                 },
               },
-              corsHeaders
+              corsHeaders,
+              404
             );
           }
         }
