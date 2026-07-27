@@ -262,8 +262,15 @@ export function validateModernRequest(
   // ── Version support ───────────────────────────────────────────
   // The header is authoritative for routing; the body is the source of truth.
   // They are equal by this point when both are present.
+  //
+  // Only the modern revision is servable on this path. A request framed as
+  // modern that names a *legacy* revision is self-contradictory — the
+  // handshake era has no `_meta` — and must not be accepted, or we would
+  // apply 2026 semantics and stamp a response version the client never asked
+  // for. Answering `-32022` lets it renegotiate. The `supported` list still
+  // advertises the legacy revisions, which remain reachable via `initialize`.
   const requested = declaredVersion ?? versionHeader;
-  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) {
+  if (requested !== MODERN_PROTOCOL_VERSION) {
     return {
       ok: false,
       status: 400,
@@ -288,8 +295,17 @@ export function validateModernRequest(
     };
   }
 
+  // `ClientCapabilities` is a map. An array satisfies `typeof === 'object'`,
+  // so it must be excluded explicitly — otherwise a malformed request executes
+  // as though it declared capabilities, and `clientExtensions()` silently
+  // reports none. `readMeta` already rejects arrays for the same reason.
   const capabilities = meta?.[META_CLIENT_CAPABILITIES];
-  if (capabilities === undefined || typeof capabilities !== 'object' || capabilities === null) {
+  if (
+    capabilities === undefined ||
+    typeof capabilities !== 'object' ||
+    capabilities === null ||
+    Array.isArray(capabilities)
+  ) {
     return {
       ok: false,
       status: 400,

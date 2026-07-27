@@ -282,6 +282,53 @@ describe('validateModernRequest', () => {
     });
   });
 
+  it('rejects modern framing that names a legacy version', () => {
+    // Self-contradictory: the handshake era has no `_meta`. Accepting it would
+    // apply 2026 semantics and stamp a response version never requested.
+    const body = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/list',
+      params: {
+        _meta: { [META_PROTOCOL_VERSION]: '2025-11-25', [META_CLIENT_CAPABILITIES]: {} },
+      },
+    };
+    const result = validateModernRequest(
+      body,
+      headersOf({ 'MCP-Protocol-Version': '2025-11-25', 'Mcp-Method': 'tools/list' })
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      status: 400,
+      error: { code: ERROR_UNSUPPORTED_PROTOCOL_VERSION, data: { requested: '2025-11-25' } },
+    });
+    // Legacy revisions stay advertised — they remain reachable via initialize.
+    expect(SUPPORTED_PROTOCOL_VERSIONS).toContain('2025-11-25');
+  });
+
+  it('rejects array-valued clientCapabilities with -32602', () => {
+    const body = {
+      jsonrpc: '2.0' as const,
+      id: 1,
+      method: 'tools/list',
+      params: {
+        _meta: {
+          [META_PROTOCOL_VERSION]: MODERN_PROTOCOL_VERSION,
+          [META_CLIENT_CAPABILITIES]: [],
+        },
+      },
+    };
+    expect(
+      validateModernRequest(
+        body,
+        headersOf({
+          'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+          'Mcp-Method': 'tools/list',
+        })
+      )
+    ).toMatchObject({ ok: false, status: 400, error: { code: ERROR_INVALID_PARAMS } });
+  });
+
   it('rejects a missing _meta clientCapabilities with -32602', () => {
     const body = {
       jsonrpc: '2.0' as const,
