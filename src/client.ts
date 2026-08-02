@@ -427,8 +427,16 @@ export class PlytixClient {
       const system: string[] = [];
       const custom: PlytixFilterDefinition[] = [];
 
-      if (filtersResult.data) {
-        for (const filter of filtersResult.data) {
+      // Plytix (observed 2026-08) wraps the filter list in a single
+      // { attributes: [...] } object inside data; older accounts returned the
+      // filter definitions directly in data. Accept both shapes.
+      const raw = (filtersResult.data ?? []) as Array<
+        PlytixFilterDefinition & { attributes?: PlytixFilterDefinition[] }
+      >;
+      const filterList = Array.isArray(raw[0]?.attributes) ? raw[0].attributes! : raw;
+
+      if (filterList) {
+        for (const filter of filterList) {
           const field = filter.key ?? filter.field;
           if (field) {
             if (field.startsWith('attributes.')) {
