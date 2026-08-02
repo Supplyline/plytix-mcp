@@ -468,4 +468,101 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
       }
     }
   );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_list_attributes - Directly linked family attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string }>(
+    server,
+    'families_list_attributes',
+    {
+      title: 'List Family Attributes',
+      description: 'List direct family attributes.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+      },
+    },
+    async ({ family_id }) => {
+      try {
+        const result = await client.getFamilyAttributes(family_id);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  family_id,
+                  attributes: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error listing family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // families_list_all_attributes - Direct + inherited family attributes
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ family_id: string }>(
+    server,
+    'families_list_all_attributes',
+    {
+      title: 'List All Family Attributes',
+      description: 'List all family attributes.',
+      inputSchema: {
+        family_id: z.string().min(1).describe('The product family ID'),
+      },
+    },
+    async ({ family_id }) => {
+      try {
+        const result = await client.getFamilyAllAttributes(family_id);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  family_id,
+                  attributes: result.data,
+                  count: result.data?.length ?? 0,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error listing all family attributes: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
 }

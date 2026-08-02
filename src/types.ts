@@ -106,6 +106,176 @@ export interface PlytixProduct {
   [key: string]: unknown;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Batch Product Updates
+// ─────────────────────────────────────────────────────────────
+
+export interface BatchUpdateItem {
+  sku?: string;
+  product_id?: string;
+  label?: string;
+  status?: string;
+  attributes?: Record<string, unknown>;
+  expected_attributes?: Record<string, unknown>;
+  if_match?: Record<string, unknown>;
+}
+
+export type BatchUpdateFailureStage =
+  | 'validation'
+  | 'resolve'
+  | 'verify'
+  | 'duplicate'
+  | 'conflict'
+  | 'patch';
+
+export interface BatchUpdateErrorDetail {
+  field?: string;
+  msg: string;
+}
+
+export interface BatchUpdateFailure {
+  key: string;
+  index: number;
+  product_id?: string;
+  stage: BatchUpdateFailureStage;
+  errors: BatchUpdateErrorDetail[];
+}
+
+export interface BatchUpdateSuccess {
+  key: string;
+  index: number;
+  product_id: string;
+  modified?: string;
+}
+
+export interface BatchUpdateSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface BatchUpdateMetadata {
+  series_id?: string;
+  config_snapshot_hash?: string;
+  manifest_sha256?: string;
+}
+
+export type BatchUpdateResult =
+  | {
+      status: 'rejected';
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      metadata?: BatchUpdateMetadata;
+    }
+  | {
+      status: 'finished';
+      dry_run?: boolean;
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      successes?: BatchUpdateSuccess[];
+      metadata?: BatchUpdateMetadata;
+    };
+
+// ─────────────────────────────────────────────────────────────
+// Batch Product Exports
+// ─────────────────────────────────────────────────────────────
+
+export type ProductExportMode = 'search' | 'skus' | 'product_ids';
+
+export type ProductExportSelector =
+  | {
+      mode: 'search';
+      filters?: unknown[] | null;
+      sort?: unknown;
+      confirm_full_catalog?: boolean;
+    }
+  | {
+      mode: 'skus';
+      skus: string[];
+    }
+  | {
+      mode: 'product_ids';
+      product_ids: string[];
+    };
+
+export type ProductBatchExportInput = ProductExportSelector & {
+  attributes?: string[];
+  max_rows?: number;
+  page_size?: number;
+  preview_rows?: number;
+};
+
+export type ProductBatchExportFormat = 'jsonl' | 'ndjson';
+
+export type ProductBatchExportToFileInput = ProductBatchExportInput & {
+  output_path: string;
+  format?: ProductBatchExportFormat;
+  overwrite?: boolean;
+};
+
+export type ProductBatchExportLimitReason =
+  | 'max_rows'
+  | 'file_byte_cap'
+  | 'inline_row_cap'
+  | 'inline_byte_cap'
+  | 'api_window_limit';
+
+export type ProductBatchExportFailureStage =
+  | 'validation'
+  | 'resolve'
+  | 'fetch'
+  | 'write'
+  | 'limit';
+
+export interface ProductBatchExportFailure {
+  key: string;
+  index?: number;
+  stage: ProductBatchExportFailureStage;
+  errors: BatchUpdateErrorDetail[];
+}
+
+export interface ProductBatchExportSummary {
+  requested?: number;
+  matched?: number;
+  exported: number;
+  failed: number;
+  truncated: boolean;
+  limit_reason?: ProductBatchExportLimitReason;
+}
+
+export interface ProductBatchExportMetadata {
+  selector_mode: ProductExportMode;
+  output_path?: string;
+  row_count: number;
+  page_size: number;
+  pages_read?: number;
+  started_at: string;
+  completed_at: string;
+  query_sha256?: string;
+  export_sha256?: string;
+  attributes_requested?: string[];
+  attributes_returned_observed?: string[];
+  format?: ProductBatchExportFormat;
+}
+
+export type ProductBatchExportResult =
+  | {
+      status: 'rejected';
+      summary: ProductBatchExportSummary;
+      failures: ProductBatchExportFailure[];
+      metadata?: ProductBatchExportMetadata;
+    }
+  | {
+      status: 'finished';
+      mode: 'inline' | 'file';
+      products?: PlytixProduct[];
+      preview: PlytixProduct[];
+      summary: ProductBatchExportSummary;
+      failures: ProductBatchExportFailure[];
+      metadata: ProductBatchExportMetadata;
+    };
+
 export interface PlytixRelationship {
   relationship_id: string;
   relationship_label: string;
@@ -114,6 +284,16 @@ export interface PlytixRelationship {
     quantity?: number;
     last_modified?: string;
   }>;
+}
+
+export interface PlytixRelationshipDefinition {
+  id: string;
+  label: string;
+  name?: string;
+  symmetrical?: boolean;
+  created?: string;
+  modified?: string;
+  [key: string]: unknown;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -131,6 +311,7 @@ export interface PlytixFamily {
 }
 
 export interface PlytixFamilyAttribute {
+  id?: string;
   label: string;          // e.g., "head_material" (snake_case identifier)
   name: string;           // e.g., "Head Material" (human-readable)
   type?: string;          // e.g., "dropdown", "text", "number"
@@ -139,6 +320,7 @@ export interface PlytixFamilyAttribute {
   inherited?: boolean;    // whether inherited from parent family
   default_value?: unknown;
   options?: unknown[];    // for dropdown/multiselect types
+  [key: string]: unknown;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -206,10 +388,15 @@ export interface PlytixAttributeDetail {
 }
 
 export interface PlytixFilterDefinition {
-  field: string;
-  type: string;
+  key?: string;
+  field?: string;
+  type?: string;
+  filter_type?: string;
   label?: string;
+  name?: string;
+  operators?: FilterOperator[];
   options?: unknown[];
+  [key: string]: unknown;
 }
 
 // ─────────────────────────────────────────────────────────────

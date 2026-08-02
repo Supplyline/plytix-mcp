@@ -85,13 +85,13 @@ const steps = [
     }
   },
   {
-    name: 'Test products.get (will fail without real credentials)',
+    name: 'Test products_get (will fail without real credentials)',
     message: {
       jsonrpc: '2.0',
       id: 3,
       method: 'tools/call',
       params: {
-        name: 'products.get',
+        name: 'products_get',
         arguments: {
           product_id: 'test-product-123'
         }

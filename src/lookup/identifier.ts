@@ -20,8 +20,11 @@ export interface DetectionResult {
  * - 0.95: GTIN (8/12/13/14 digits)
  * - 0.9: Label (contains spaces)
  * - 0.8: MPN (dashed alphanumeric, no vendor prefix)
- * - 0.7: SKU (alphanumeric with separators)
- * - 0.6: MNO (pure alphanumeric)
+ * - 0.7: SKU (alphanumeric, with or without separators)
+ *
+ * Note: MNO (model number) is never auto-detected because the SKU pattern below also
+ * matches pure-alphanumeric values. Use products_find with an explicit `mno` argument
+ * for model-number lookups.
  */
 export function detectIdentifierType(raw: string): DetectionResult {
   const s = raw.trim();
@@ -45,20 +48,16 @@ export function detectIdentifierType(raw: string): DetectionResult {
     return { type: 'label', confidence: 0.9 };
   }
 
-  // Contains dashes inside alphanumeric - likely MPN (e.g., "PD041-828SI", "ABC-123-XYZ")
-  // But not if it starts with a vendor prefix like "LMI-" (3+ letters followed by dash)
+  // Contains dashes inside alphanumeric - likely MPN (e.g., "ABC-123-XYZ")
+  // But not if it starts with a vendor prefix (3+ letters followed by a dash)
   if (/^[A-Z0-9]+(?:-[A-Z0-9]+)+$/i.test(s) && !/^[A-Z]{3,}-/i.test(s)) {
     return { type: 'mpn', confidence: 0.8 };
   }
 
-  // Alphanumeric with dots, underscores, or dashes - likely SKU (e.g., "LMI-PD041828SI")
+  // Alphanumeric with dots, underscores, or dashes - likely SKU (e.g., "VND-001XYZ").
+  // This also matches pure-alphanumeric model numbers, so MNO is never auto-detected.
   if (/^[A-Z0-9][A-Z0-9._-]*$/i.test(s)) {
     return { type: 'sku', confidence: 0.7 };
-  }
-
-  // Pure alphanumeric without separators - could be MNO or simple SKU
-  if (/^[A-Z0-9]+$/i.test(s)) {
-    return { type: 'mno', confidence: 0.6 };
   }
 
   return { type: 'unknown', confidence: 0 };

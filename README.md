@@ -2,11 +2,11 @@
 
 A **lightweight, stateless Model Context Protocol (MCP) server** that provides AI assistants with live access to Plytix PIM (Product Information Management) data. This server enables AI tools like Claude Desktop, Claude mobile app, and other MCP clients to search, look up, and retrieve product information directly from the Plytix API.
 
-> **Note:** This is a read-only query tool for live API access. For sync, caching, or ETL workflows, see [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
+> **Note:** This is a stateless, live API tool for read and write operations. For sync, caching, or ETL workflows, pair it with a separate persistence layer of your choosing.
 
 ## Features
 
-- **11 MCP Tools** for comprehensive Plytix PIM access
+- **51 MCP tools via stdio and 46 via the remote worker**
 - **Smart product lookup** with automatic identifier detection (SKU, MPN, GTIN, label)
 - **Family & inheritance tracking** with overwritten_attributes support
 - **Schema discovery** for attributes and search filters
@@ -98,6 +98,26 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
+The remote worker exposes 46 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
+
+### Protocol versions
+
+The worker is **dual-era**: it serves both the stateless `2026-07-28` revision and the
+older handshake-based revisions on the same endpoint, choosing per request.
+
+| Client sends | Served as |
+|---|---|
+| `_meta` with `io.modelcontextprotocol/protocolVersion`, or an `MCP-Protocol-Version` header naming a non-legacy version | `2026-07-28` — mirrored-header validation, `server/discover`, `resultType`/`serverInfo` on results, spec HTTP status codes |
+| `initialize` handshake (`2025-11-25` … `2024-11-05`) | Legacy — responses unchanged from previous releases |
+
+A client newer than this server receives `-32022` with the supported list and can
+renegotiate down. The `2026-07-28` transport dropped the standalone `GET` stream and
+`DELETE` teardown, so both now answer `405`; `Mcp-Session-Id` is ignored rather than
+echoed.
+
+The stdio server still speaks the legacy handshake — it delegates the protocol to
+`@modelcontextprotocol/sdk`, which has not yet shipped `2026-07-28`.
+
 ### Local Development
 
 ```bash
@@ -115,8 +135,18 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 |------|-------------|
 | `products_lookup` | Smart lookup by any identifier (auto-detects ID, SKU, MPN, GTIN, label) |
 | `products_get` | Get single product by ID with full details and `overwritten_attributes` |
+| `products_get_full` | Get one product with related family, variants, categories, and assets |
 | `products_search` | Advanced search with filters, pagination, and sorting |
 | `products_find` | Simple multi-criteria search (SKU, MPN, MNO, GTIN, label, fuzzy) |
+| `products_batch_export` | Capped inline product snapshot by search, SKU, or product ID |
+| `products_batch_export_to_file` | Stdio-only JSONL/NDJSON product export under `PLYTIX_MCP_EXPORT_DIR` |
+| `products_create` | Create a new product |
+| `products_update` | Partial update to product fields/attributes |
+| `products_batch_update` | Apply a small guarded product-update batch |
+| `products_batch_update_manifest` | Stdio-only guarded product updates from a local JSON manifest |
+| `products_assign_family` | Assign or unassign a product family |
+| `products_set_attribute` | Atomic set of one attribute value |
+| `products_clear_attribute` | Atomic clear of one attribute value |
 
 ### Family Tools
 
@@ -124,21 +154,73 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 |------|-------------|
 | `families_list` | List or search product families |
 | `families_get` | Get single family with linked attributes |
+| `families_create` | Create a new product family |
+| `families_link_attribute` | Link one or more attributes to a family |
+| `families_unlink_attribute` | Unlink one or more attributes from a family |
+| `families_list_attributes` | List attributes directly linked to a family |
+| `families_list_all_attributes` | List direct and inherited family attributes |
 
-### Attribute Tools
+### Attribute & Filter Tools
 
 | Tool | Description |
 |------|-------------|
 | `attributes_list` | List all attributes (system + custom) with types and options |
-| `attributes_filters` | Get available search filters and operators |
+| `attributes_get` | Get full metadata for one attribute label |
+| `attributes_get_options` | Get allowed values for a selectable attribute |
+| `attributes_filters` | Deprecated alias for product filter discovery |
+| `products_filters` | Get product search filter metadata |
+| `assets_filters` | Get asset search filter metadata |
+| `relationships_filters` | Get relationship search filter metadata |
 
-### Related Data Tools
+### Asset Tools
 
 | Tool | Description |
 |------|-------------|
+| `assets_get` | Get one asset by ID |
+| `assets_search` | Search account assets |
+| `assets_update` | Update asset metadata (`filename`, `categories`) |
 | `assets_list` | List assets (images, videos, documents) linked to a product |
+| `assets_link` | Link an asset to a product |
+| `assets_unlink` | Unlink an asset from a product |
+
+### Category Tools
+
+| Tool | Description |
+|------|-------------|
+| `categories_search` | Search existing categories |
 | `categories_list` | List categories associated with a product |
+| `categories_link` | Link a category to a product |
+| `categories_unlink` | Unlink a category from a product |
+
+### Variant Tools
+
+| Tool | Description |
+|------|-------------|
+| `variants_create` | Create a variant under a parent product |
+| `variants_link` | Link an existing product as a variant |
+| `variants_unlink` | Unlink a variant from its parent without deleting it |
 | `variants_list` | List variants for a product |
+| `variants_resync` | Reset variant attributes to inherit parent values |
+
+### Relationship Tools
+
+| Tool | Description |
+|------|-------------|
+| `relationships_get` | Get a relationship definition by ID |
+| `relationships_search` | Search relationship definitions |
+| `relationships_link_product` | Link one related product row in a relationship |
+| `relationships_unlink_product` | Unlink one related product row in a relationship |
+| `relationships_set_quantity` | Update quantity for one related product row |
+
+### Identifier Utilities (Stdio Only)
+
+| Tool | Description |
+|------|-------------|
+| `identifier_detect` | Detect identifier type from raw value |
+| `identifier_normalize` | Normalize identifier for matching |
+| `match_score` | Score identifier-product match confidence |
+
+The remote worker exposes every tool above except the three identifier utilities in the final section and the two stdio-only filesystem tools: `products_batch_update_manifest` and `products_batch_export_to_file`.
 
 ## Smart Lookup System
 
@@ -185,6 +267,7 @@ Products return an `overwritten_attributes` array listing which attributes are e
 | `PLYTIX_AUTH_URL` | ❌ | `https://auth.plytix.com/auth/api/get-token` | Auth endpoint |
 | `PLYTIX_MPN_LABELS` | ❌ | `["attributes.mpn"]` | JSON array of MPN attribute labels |
 | `PLYTIX_MNO_LABELS` | ❌ | `["attributes.model_no"]` | JSON array of MNO attribute labels |
+| `PLYTIX_MCP_EXPORT_DIR` | ❌ | — | Required only for `products_batch_export_to_file`; limits file exports to this directory |
 
 ## Development
 
@@ -218,13 +301,15 @@ src/
     identifier.ts       # Identifier type detection
     lookup.ts           # Smart lookup with staged search
   tools/
-    products.ts         # Product tools (lookup, get, search, find)
-    families.ts         # Family tools (list, get)
-    attributes.ts       # Attribute tools (list, filters)
-    assets.ts           # Asset listing
-    categories.ts       # Category listing
-    variants.ts         # Variant listing
-  supplyline/           # Supplyline-specific customizations
+    products.ts         # Product tools (lookup, get, search, find, write ops)
+    families.ts         # Family tools (list, get, create, attribute membership)
+    attributes.ts       # Attribute metadata + filter discovery tools
+    product-attributes.ts # Atomic product attribute write tools
+    assets.ts           # Asset get/search/update + product asset link tools
+    categories.ts       # Category search + product category link tools
+    variants.ts         # Variant lifecycle tools
+    relationships.ts    # Relationship discovery + product relationship write tools
+  extensions/           # Optional deployment-specific customizations
 wrangler.toml           # Cloudflare Workers configuration
 docs/
   remote-setup.md       # Remote server setup guide
@@ -239,7 +324,7 @@ This MCP server is intentionally **stateless and lightweight**:
 - **No background jobs** — Request/response only
 - **Ephemeral in-memory cache** — Brief (60s) request deduplication, cleared on restart
 
-For ETL, sync, or persistent caching needs, use a separate tool like [supplyline-sync](https://github.com/Supplyline/supplyline-sync).
+For ETL, sync, or persistent caching needs, pair this server with a separate persistence layer.
 
 ## License
 

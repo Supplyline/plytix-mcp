@@ -60,13 +60,13 @@ describe('detectIdentifierType', () => {
 
   describe('Label detection', () => {
     it('detects strings with spaces as labels', () => {
-      const result = detectIdentifierType('Metering Pump LMI Series');
+      const result = detectIdentifierType('Metering Pump ACME Series');
       expect(result.type).toBe('label');
       expect(result.confidence).toBe(0.9);
     });
 
     it('detects product names with multiple spaces', () => {
-      const result = detectIdentifierType('Blue White C-6125 Flex Pump');
+      const result = detectIdentifierType('Acme C-6125 Flex Pump');
       expect(result.type).toBe('label');
       expect(result.confidence).toBe(0.9);
     });
@@ -81,7 +81,7 @@ describe('detectIdentifierType', () => {
 
     it('does not detect vendor-prefixed SKU as MPN', () => {
       // ABC- is only 3 letters, so it matches vendor prefix exclusion
-      const result = detectIdentifierType('LMI-PD041828SI');
+      const result = detectIdentifierType('VND-PD041828SI');
       expect(result.type).toBe('sku');
       expect(result.confidence).toBe(0.7);
     });
@@ -89,13 +89,13 @@ describe('detectIdentifierType', () => {
 
   describe('SKU detection', () => {
     it('detects vendor-prefixed codes as SKU', () => {
-      const result = detectIdentifierType('LMI-PD041828SI');
+      const result = detectIdentifierType('VND-PD041828SI');
       expect(result.type).toBe('sku');
       expect(result.confidence).toBe(0.7);
     });
 
     it('detects codes with dots as SKU', () => {
-      const result = detectIdentifierType('BWI.C6125');
+      const result = detectIdentifierType('VND.C6125');
       expect(result.type).toBe('sku');
       expect(result.confidence).toBe(0.7);
     });
@@ -144,7 +144,7 @@ describe('detectIdentifierType', () => {
 
 describe('normalize', () => {
   it('removes special characters', () => {
-    expect(normalize('LMI-PD041-828SI')).toBe('LMIPD041828SI');
+    expect(normalize('VND-PD041-828SI')).toBe('VNDPD041828SI');
   });
 
   it('converts to uppercase', () => {
@@ -162,7 +162,7 @@ describe('normalize', () => {
 
 describe('calculateSimilarity', () => {
   it('returns 1.0 for exact match after normalization', () => {
-    expect(calculateSimilarity('LMI-PD041', 'LMIPD041')).toBe(1.0);
+    expect(calculateSimilarity('VND-PD041', 'VNDPD041')).toBe(1.0);
   });
 
   it('returns 0 for completely different strings', () => {
@@ -170,7 +170,7 @@ describe('calculateSimilarity', () => {
   });
 
   it('returns partial score for substring match', () => {
-    const score = calculateSimilarity('PD041', 'LMIPD041828SI');
+    const score = calculateSimilarity('PD041', 'VNDPD041828SI');
     expect(score).toBeGreaterThan(0);
     expect(score).toBeLessThan(1);
   });

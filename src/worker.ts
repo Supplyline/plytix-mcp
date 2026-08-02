@@ -12,6 +12,42 @@
 
 import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
+import { stripAttributesPrefix } from './utils/attribute-labels.js';
+import { validateAttributeValue } from './utils/validate-attribute.js';
+import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
+import {
+  WORKER_EXPORT_INLINE_MAX_BYTES,
+  WORKER_EXPORT_INLINE_MAX_ROWS,
+} from './batch/export.js';
+import {
+  ERROR_METHOD_NOT_FOUND,
+  MODERN_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  decorateModernResult,
+  isModernBatch,
+  isModernRequest,
+  negotiateLegacyVersion,
+  validateModernRequest,
+} from './protocol.js';
+
+/** Self-reported identity, echoed in `initialize`, `server/discover` and modern results. */
+const SERVER_INFO = { name: 'plytix-mcp', version: '0.3.3' } as const;
+
+/**
+ * Methods dispatchable on the *modern* path.
+ *
+ * Used to answer an unimplemented method with `404` before the auth gate: a
+ * method that does not exist has nothing to protect, and the spec requires the
+ * `404` + `-32601` pair so a dual-era client can tell a modern server apart
+ * from a legacy endpoint that does not host this path.
+ *
+ * `initialize` and `notifications/initialized` are deliberately absent — the
+ * modern revision removed the handshake, so serving them here would hand a
+ * client a decorated "handshake succeeded" result for a method this era does
+ * not define. They remain reachable on the legacy path, which never consults
+ * this set.
+ */
+const MODERN_METHODS = new Set(['server/discover', 'tools/list', 'tools/call', 'ping']);
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -20,6 +56,15 @@ import { WorkerPlytixLookup } from './worker-lookup.js';
 interface Env {
   PLYTIX_API_BASE?: string;
   PLYTIX_AUTH_URL?: string;
+  OAUTH_KV?: KVNamespace;
+  // Secret used to derive the AES-GCM key that encrypts stored Plytix
+  // credentials at rest in OAUTH_KV. Set via `wrangler secret put
+  // OAUTH_TOKEN_SECRET`. When OAUTH_KV is configured, the OAuth endpoints
+  // refuse to operate without this secret so credentials are never stored
+  // in plaintext.
+  OAUTH_TOKEN_SECRET?: string;
+  // Access-token lifetime in seconds. Default 7 days; clamped to [1 hour, 30 days].
+  OAUTH_TOKEN_TTL_SECONDS?: string;
 }
 
 interface JsonRpcRequest {
@@ -74,16 +119,49 @@ const ALLOWED_ORIGINS = [
   'http://localhost:8080',
 ];
 
+function clientSafeError(error: unknown): string {
+  // PlytixError carries the upstream HTTP status and the raw upstream body in its message.
+  // Surface only a generic, status-based message to callers; log the full detail server-side.
+  if (error && typeof error === 'object' && 'status' in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === 'number') {
+      console.error('[plytix-mcp] upstream error:', error);
+      return `Upstream Plytix request failed (HTTP ${status})`;
+    }
+  }
+  return error instanceof Error ? error.message : 'Internal error';
+}
+
+function isAllowedClaudeOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    return u.protocol === 'https:' && (u.hostname === 'claude.ai' || u.hostname.endsWith('.claude.ai'));
+  } catch {
+    return false;
+  }
+}
+
 function getCorsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get('Origin') || '';
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Plytix-API-Key, X-Plytix-API-Password, Authorization',
+    // `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` are the request
+    // metadata the Streamable HTTP transport mirrors into headers; browser
+    // clients cannot send them unless they are allowed here.
+    'Access-Control-Allow-Headers':
+      'Content-Type, X-Plytix-API-Key, X-Plytix-API-Password, Authorization, ' +
+      'MCP-Protocol-Version, Mcp-Method, Mcp-Name',
+    // `MCP-Protocol-Version` is not a CORS-safelisted response header, so
+    // without this a browser transport cannot read the version we answered
+    // with — even though we allow it on the way in and emit it on the way out.
+    'Access-Control-Expose-Headers': 'MCP-Protocol-Version',
     'Access-Control-Max-Age': '86400',
   };
 
-  // Only allow specific origins (Claude clients and local development)
-  if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.claude.ai')) {
+  // Only allow specific origins (Claude clients and local development). Parse with URL()
+  // to require https and an exact claude.ai host/subdomain — a bare endsWith('.claude.ai')
+  // would also accept plaintext-http and lookalike hosts like "evil.claude.ai.attacker.com".
+  if (ALLOWED_ORIGINS.includes(origin) || isAllowedClaudeOrigin(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
   }
   // For requests without an allowed origin, don't set Access-Control-Allow-Origin
@@ -93,17 +171,294 @@ function getCorsHeaders(request: Request): Record<string, string> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// OAuth Helpers
+// ─────────────────────────────────────────────────────────────
+
+function generateToken(bytes = 32): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function computeS256(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return base64urlEncode(new Uint8Array(hash));
+}
+
+function base64urlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64urlDecode(value: string): Uint8Array {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// Derive a stable AES-GCM key from the configured secret. The secret is
+// stretched through SHA-256 to a fixed 256-bit key.
+async function deriveCredKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+  return crypto.subtle.importKey('raw', material, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+// Encrypt the Plytix credential pair for storage in KV. Output is
+// base64url(iv[12] || ciphertext+tag). A fresh random IV is used per call.
+async function encryptCreds(
+  creds: { api_key: string; api_password: string },
+  secret: string
+): Promise<string> {
+  const key = await deriveCredKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(creds));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext)
+  );
+  const combined = new Uint8Array(iv.length + ciphertext.length);
+  combined.set(iv, 0);
+  combined.set(ciphertext, iv.length);
+  return base64urlEncode(combined);
+}
+
+// Decrypt a credential blob produced by encryptCreds. Throws if the secret
+// is wrong or the blob is tampered (AES-GCM authentication failure).
+async function decryptCreds(
+  blob: string,
+  secret: string
+): Promise<{ api_key: string; api_password: string }> {
+  const key = await deriveCredKey(secret);
+  const combined = base64urlDecode(blob);
+  const iv = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+// Validate that a request's redirect_uri exactly matches one the client
+// registered via Dynamic Client Registration. Returns true only when the
+// client exists and the redirect_uri is an exact-string member of its
+// registered list. This is the control that prevents authorization codes
+// (and the credentials they unlock) from being delivered to an
+// attacker-controlled URL.
+interface ClientRegistration {
+  redirect_uris?: unknown;
+  client_name?: unknown;
+}
+
+async function getClientRegistration(
+  kv: KVNamespace,
+  clientId: string
+): Promise<ClientRegistration | null> {
+  if (!clientId) return null;
+  return (await kv.get(`client:${clientId}`, 'json')) as ClientRegistration | null;
+}
+
+function redirectUriMatches(client: ClientRegistration | null, redirectUri: string): boolean {
+  if (!client || !redirectUri || !Array.isArray(client.redirect_uris)) return false;
+  return client.redirect_uris.includes(redirectUri);
+}
+
+async function isRegisteredRedirectUri(
+  kv: KVNamespace,
+  clientId: string,
+  redirectUri: string
+): Promise<boolean> {
+  return redirectUriMatches(await getClientRegistration(kv, clientId), redirectUri);
+}
+
+// Validate redirect URIs at registration time. Exact-match checking at
+// authorize/token time is the load-bearing control; this narrows what can be
+// registered at all: https everywhere, plain http only for local loopback
+// development. Custom app schemes are intentionally rejected until a real
+// client needs one.
+function isAcceptableRedirectUri(uri: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol === 'http:') {
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  }
+  return false;
+}
+
+// Constant-time string comparison. Not strictly required for PKCE (the
+// compared challenge already traveled in the authorize URL), but uniform
+// comparison cost is cheap hygiene for anything auth-shaped.
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  let diff = ab.length ^ bb.length;
+  const len = Math.max(ab.length, bb.length, 1);
+  for (let i = 0; i < len; i++) {
+    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+// Coarse fixed-window rate limiter backed by KV. KV is eventually consistent
+// across edge locations, so this is an abuse brake, not an exact counter —
+// good enough to blunt credential-stuffing through /authorize and KV spam
+// through /register. Returns false when the caller is over the limit.
+async function rateLimit(
+  kv: KVNamespace,
+  scope: string,
+  key: string,
+  limit: number,
+  windowSeconds: number
+): Promise<boolean> {
+  const kvKey = `rl:${scope}:${key}`;
+  const now = Date.now();
+  const existing = (await kv.get(kvKey, 'json')) as { count: number; windowStart: number } | null;
+  if (!existing || now - existing.windowStart > windowSeconds * 1000) {
+    await kv.put(kvKey, JSON.stringify({ count: 1, windowStart: now }), {
+      expirationTtl: Math.max(windowSeconds * 2, 60),
+    });
+    return true;
+  }
+  if (existing.count >= limit) return false;
+  await kv.put(
+    kvKey,
+    JSON.stringify({ count: existing.count + 1, windowStart: existing.windowStart }),
+    { expirationTtl: Math.max(windowSeconds * 2, 60) }
+  );
+  return true;
+}
+
+function rateLimitedResponse(
+  windowSeconds: number,
+  corsHeaders: Record<string, string> = {}
+): Response {
+  return new Response(
+    JSON.stringify({ error: 'rate_limited', error_description: 'Too many requests' }),
+    {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': String(windowSeconds),
+        ...corsHeaders,
+      },
+    }
+  );
+}
+
+function clientIpOf(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') || 'unknown';
+}
+
+// Parse + clamp the configured access-token TTL. Default 7 days.
+function resolveTokenTtlSeconds(raw?: string): number {
+  const DEFAULT = 60 * 60 * 24 * 7;
+  const MIN = 60 * 60;
+  const MAX = 60 * 60 * 24 * 30;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed)) return DEFAULT;
+  return Math.min(MAX, Math.max(MIN, parsed));
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderAuthorizePage(params: {
+  clientId: string;
+  redirectUri: string;
+  state: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  scope: string;
+  clientName?: string;
+  error?: string;
+}): string {
+  const errorHtml = params.error
+    ? `<div class="error">${escapeHtml(params.error)}</div>`
+    : '';
+
+  // Show the user WHO is asking and WHERE the auth code will be sent.
+  // client_name is attacker-controlled input — always escaped.
+  const requesterName = params.clientName?.trim() ? params.clientName.trim() : 'An application';
+  let redirectHost = '';
+  try {
+    redirectHost = new URL(params.redirectUri).host;
+  } catch {
+    redirectHost = '';
+  }
+  const destinationHtml = redirectHost
+    ? `<div class="info">After you approve, an access code will be sent to <strong>${escapeHtml(redirectHost)}</strong>.</div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize - Plytix MCP</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;padding:20px;display:flex;justify-content:center;align-items:center;min-height:100vh}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.1);padding:40px;max-width:420px;width:100%}
+    h1{font-size:24px;color:#1a1a1a;margin-bottom:8px}
+    .subtitle{color:#666;font-size:14px;line-height:1.5;margin-bottom:24px}
+    .info{background:#f0f4ff;border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:#4f46e5;line-height:1.5}
+    .error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:#dc2626;line-height:1.5}
+    label{display:block;font-size:14px;font-weight:500;color:#333;margin-bottom:6px}
+    input[type="text"],input[type="password"]{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:16px}
+    input:focus{outline:none;border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+    button{width:100%;padding:12px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:500;cursor:pointer}
+    button:hover{background:#4338ca}
+    .help{margin-top:16px;font-size:12px;color:#999;text-align:center}
+    .help a{color:#4f46e5;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Plytix MCP</h1>
+    <p class="subtitle"><strong>${escapeHtml(requesterName)}</strong> is requesting access to your Plytix PIM data.</p>
+    ${errorHtml}
+    ${destinationHtml}
+    <div class="info">Enter your Plytix API credentials. They are stored securely and used only to access the Plytix API on your behalf.</div>
+    <form method="POST" action="/authorize">
+      <input type="hidden" name="client_id" value="${escapeHtml(params.clientId)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(params.redirectUri)}">
+      <input type="hidden" name="state" value="${escapeHtml(params.state)}">
+      <input type="hidden" name="code_challenge" value="${escapeHtml(params.codeChallenge)}">
+      <input type="hidden" name="code_challenge_method" value="${escapeHtml(params.codeChallengeMethod)}">
+      <input type="hidden" name="scope" value="${escapeHtml(params.scope)}">
+      <label for="api_key">API Key</label>
+      <input type="text" id="api_key" name="api_key" required placeholder="Your Plytix API key" autocomplete="username">
+      <label for="api_password">API Password</label>
+      <input type="password" id="api_password" name="api_password" required placeholder="Your Plytix API password" autocomplete="current-password">
+      <button type="submit">Authorize</button>
+    </form>
+    <p class="help">Find your API credentials in <a href="https://pim.plytix.com/settings/api" target="_blank" rel="noopener">Plytix Settings</a></p>
+  </div>
+</body>
+</html>`;
+}
+
+// ─────────────────────────────────────────────────────────────
 // Tool Definitions
 // ─────────────────────────────────────────────────────────────
 
 const TOOLS: ToolDefinition[] = [
   {
     name: 'products_lookup',
-    description:
-      'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-      'Uses staged search strategies with confidence scoring. ' +
-      'Returns the best match along with the search plan used. ' +
-      'MPN/MNO searches use attributes.mpn/model_no by default.',
+    description: 'Find the best product match for an identifier.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -127,9 +482,21 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_get',
-    description:
-      'Get a single product by ID. Returns full product data including ' +
-      'overwritten_attributes (attributes explicitly set, not inherited from family).',
+    description: 'Get one product by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: {
+          type: 'string',
+          description: 'The product ID to fetch',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_get_full',
+    description: 'Get one product with related data.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -143,16 +510,14 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_search',
-    description:
-      'Search products with filters, pagination, and sorting. ' +
-      'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+    description: 'Search products with filters.',
     inputSchema: {
       type: 'object',
       properties: {
         attributes: {
           type: 'array',
           items: { type: 'string' },
-          description: 'List of attributes to return (max 50)',
+          description: 'Attributes to return (max 50). Prefix custom attrs with "attributes." e.g. "attributes.head_material".',
         },
         filters: {
           type: 'array',
@@ -172,10 +537,63 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
-    name: 'products_find',
+    name: 'products_batch_export',
     description:
-      'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
-      'Simpler than products_search - just specify the fields you know.',
+      `Export a small product snapshot inline by search, SKU list, or product ID list ` +
+      `(max ${WORKER_EXPORT_INLINE_MAX_ROWS} rows and ${WORKER_EXPORT_INLINE_MAX_BYTES} serialized bytes).`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['search', 'skus', 'product_ids'],
+          description: 'Export selector mode',
+        },
+        filters: {
+          type: 'array',
+          description: 'Search filters for mode: search',
+        },
+        sort: {
+          description: 'Sort payload for mode: search',
+        },
+        confirm_full_catalog: {
+          type: 'boolean',
+          description: 'Required for empty-filter search exports',
+        },
+        skus: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Exact SKUs for mode: skus',
+        },
+        product_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Product IDs for mode: product_ids',
+        },
+        attributes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Attributes to project for search/skus mode (max 50)',
+        },
+        max_rows: {
+          type: 'number',
+          description: 'Maximum rows to export',
+        },
+        page_size: {
+          type: 'number',
+          description: 'Search page size (max 100)',
+        },
+        preview_rows: {
+          type: 'number',
+          description: 'Preview row count (max 20)',
+        },
+      },
+      required: ['mode'],
+    },
+  },
+  {
+    name: 'products_find',
+    description: 'Find products by common identifiers.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -191,7 +609,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'families_list',
-    description: 'List or search product families. Returns family IDs, names, and linked attributes.',
+    description: 'List product families.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -203,7 +621,73 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'families_get',
-    description: 'Get a single product family by ID. Returns the family name and linked attributes.',
+    description: 'Get one product family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        family_id: { type: 'string', description: 'The product family ID' },
+      },
+      required: ['family_id'],
+    },
+  },
+  {
+    name: 'families_create',
+    description: 'Create a product family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name for the new family' },
+        parent_id: { type: 'string', description: 'Optional parent family ID' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'families_link_attribute',
+    description: 'Link attributes to a family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        family_id: { type: 'string', description: 'The product family ID' },
+        attribute_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Attribute labels to link to the family',
+        },
+      },
+      required: ['family_id', 'attribute_labels'],
+    },
+  },
+  {
+    name: 'families_unlink_attribute',
+    description: 'Unlink attributes from a family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        family_id: { type: 'string', description: 'The product family ID' },
+        attribute_labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Attribute labels to unlink from the family',
+        },
+      },
+      required: ['family_id', 'attribute_labels'],
+    },
+  },
+  {
+    name: 'families_list_attributes',
+    description: 'List direct family attributes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        family_id: { type: 'string', description: 'The product family ID' },
+      },
+      required: ['family_id'],
+    },
+  },
+  {
+    name: 'families_list_all_attributes',
+    description: 'List all family attributes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -214,9 +698,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'attributes_list',
-    description:
-      'List all available product attributes (system and custom). ' +
-      'Returns attribute keys, types, labels, and options for dropdown fields.',
+    description: 'List product attributes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -229,22 +711,296 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'attributes_get',
+    description: 'Get one attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
+    name: 'attributes_get_options',
+    description: 'List allowed values for an attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: {
+          type: 'string',
+          description: 'Attribute label (snake_case identifier, e.g., "head_material")',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
     name: 'attributes_filters',
-    description: 'Get all available search filters for product queries.',
+    description: 'Deprecated alias for product filters.',
     inputSchema: {
       type: 'object',
       properties: {},
     },
   },
   {
+    name: 'products_filters',
+    description: 'List product search filters.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'assets_filters',
+    description: 'List asset search filters.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'relationships_filters',
+    description: 'List relationship search filters.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'products_set_attribute',
+    description: 'Set one product attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        attribute_label: { type: 'string', description: 'Attribute label (snake_case)' },
+        value: { description: 'Attribute value to set' },
+      },
+      required: ['product_id', 'attribute_label', 'value'],
+    },
+  },
+  {
+    name: 'products_clear_attribute',
+    description: 'Clear one product attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        attribute_label: { type: 'string', description: 'Attribute label (snake_case)' },
+      },
+      required: ['product_id', 'attribute_label'],
+    },
+  },
+  {
+    name: 'products_create',
+    description: 'Create a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sku: { type: 'string', description: 'Product SKU (required, must be unique)' },
+        label: { type: 'string', description: 'Product label/name' },
+        status: { type: 'string', description: 'Product status' },
+        attributes: {
+          type: 'object',
+          description: 'Custom attributes as key-value pairs (use attribute labels as keys)',
+        },
+        category_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Category IDs to link to this product',
+        },
+        asset_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Asset IDs to link to this product',
+        },
+      },
+      required: ['sku'],
+    },
+  },
+  {
+    name: 'products_update',
+    description: 'Update a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID to update' },
+        label: { type: 'string', description: 'New product label/name' },
+        status: { type: 'string', description: 'New product status' },
+        attributes: {
+          type: 'object',
+          description: 'Attributes to update (use attribute labels as keys, null to clear)',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
+    name: 'products_batch_update',
+    description: 'Update a small batch of products by product_id or sku using documented product PATCH operations. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: `Products to update (max ${WORKER_INLINE_MAX_ITEMS} items and ${WORKER_INLINE_MAX_BYTES} serialized bytes)`,
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Product SKU for reporting and resolution' },
+              product_id: { type: 'string', description: 'Product ID to PATCH when known' },
+              label: { type: 'string', description: 'New product label/name' },
+              status: { type: 'string', description: 'New product status' },
+              attributes: {
+                type: 'object',
+                description: 'Attributes to update (use attribute labels as keys, null to clear)',
+              },
+              expected_attributes: {
+                type: 'object',
+                description: 'Attribute values that must still match live product data before PATCH. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
+              },
+              if_match: {
+                type: 'object',
+                description: 'Top-level or attributes.* field values that must match before PATCH',
+              },
+            },
+          },
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'Validate, resolve, and verify the batch without applying PATCH updates',
+        },
+        return_successes: {
+          type: 'boolean',
+          description: 'Include one success row per patched product for exact caller ledger updates',
+        },
+      },
+      required: ['items'],
+    },
+  },
+  {
+    name: 'products_assign_family',
+    description: 'Assign or unassign a family. WARNING: reassigning a family can permanently drop attribute values not present in the target family.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        family_id: {
+          type: 'string',
+          description: 'The family ID to assign (empty string to unassign)',
+        },
+      },
+      required: ['product_id', 'family_id'],
+    },
+  },
+  {
+    name: 'assets_get',
+    description: 'Get one asset by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        asset_id: { type: 'string', description: 'The asset ID' },
+      },
+      required: ['asset_id'],
+    },
+  },
+  {
+    name: 'assets_search',
+    description: 'Search assets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filters: {
+          type: 'array',
+          description: 'Search filters in Plytix OR-of-ANDs format',
+        },
+        pagination: {
+          type: 'object',
+          properties: {
+            page: { type: 'number' },
+            page_size: { type: 'number' },
+            order: { type: 'string' },
+          },
+        },
+        sort: { description: 'Optional sort payload' },
+      },
+    },
+  },
+  {
+    name: 'assets_update',
+    description: 'Update asset filename or categories.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        asset_id: { type: 'string', description: 'The asset ID' },
+        filename: { type: 'string', description: 'New filename for the asset' },
+        categories: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Category IDs to assign to the asset',
+        },
+      },
+      required: ['asset_id'],
+    },
+  },
+  {
     name: 'assets_list',
-    description: 'List assets linked to a product.',
+    description: 'List assets linked to a product (Plytix v2)',
     inputSchema: {
       type: 'object',
       properties: {
         product_id: { type: 'string', description: 'The product ID' },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'assets_link',
+    description: 'Link an asset to a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        asset_id: { type: 'string', description: 'The asset ID to link' },
+        attribute_label: {
+          type: 'string',
+          description: 'Optional media attribute label to assign the asset to',
+        },
+      },
+      required: ['product_id', 'asset_id'],
+    },
+  },
+  {
+    name: 'assets_unlink',
+    description: 'Unlink an asset from a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        asset_id: { type: 'string', description: 'The asset ID to unlink' },
+      },
+      required: ['product_id', 'asset_id'],
+    },
+  },
+  {
+    name: 'categories_search',
+    description: 'Search product categories.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query to filter categories by name' },
+        pagination: {
+          type: 'object',
+          properties: {
+            page: { type: 'number' },
+            page_size: { type: 'number' },
+          },
+        },
+      },
     },
   },
   {
@@ -256,6 +1012,71 @@ const TOOLS: ToolDefinition[] = [
         product_id: { type: 'string', description: 'The product ID' },
       },
       required: ['product_id'],
+    },
+  },
+  {
+    name: 'categories_link',
+    description: 'Link a category to a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to link' },
+      },
+      required: ['product_id', 'category_id'],
+    },
+  },
+  {
+    name: 'categories_unlink',
+    description: 'Unlink a category from a product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        category_id: { type: 'string', description: 'The category ID to unlink' },
+      },
+      required: ['product_id', 'category_id'],
+    },
+  },
+  {
+    name: 'variants_create',
+    description: 'Create a variant under a parent product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_product_id: { type: 'string', description: 'The parent product ID' },
+        sku: { type: 'string', description: 'SKU for the new variant' },
+        label: { type: 'string', description: 'Optional label for the new variant' },
+        attributes: { description: 'Optional attributes to set or override on the variant' },
+      },
+      required: ['parent_product_id', 'sku'],
+    },
+  },
+  {
+    name: 'variants_link',
+    description: 'Link an existing product as a variant.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_product_id: { type: 'string', description: 'The parent product ID' },
+        variant_product_id: {
+          type: 'string',
+          description: 'The existing product ID to link as a variant',
+        },
+      },
+      required: ['parent_product_id', 'variant_product_id'],
+    },
+  },
+  {
+    name: 'variants_unlink',
+    description: 'Unlink a variant from its parent.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_product_id: { type: 'string', description: 'The parent product ID' },
+        variant_product_id: { type: 'string', description: 'The variant product ID to unlink' },
+      },
+      required: ['parent_product_id', 'variant_product_id'],
     },
   },
   {
@@ -271,9 +1092,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'variants_resync',
-    description:
-      'Resync variant attributes to inherit values from the parent product. ' +
-      'Restores overwritten attributes on specified variants to use the parent\'s value instead.',
+    description: 'Resync variant inheritance from the parent.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -293,6 +1112,75 @@ const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['parent_product_id', 'attribute_labels', 'variant_ids'],
+    },
+  },
+  {
+    name: 'relationships_get',
+    description: 'Get one relationship definition.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relationship_id: { type: 'string', description: 'The relationship definition ID' },
+      },
+      required: ['relationship_id'],
+    },
+  },
+  {
+    name: 'relationships_search',
+    description: 'Search relationship definitions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query to filter relationships by label' },
+        pagination: {
+          type: 'object',
+          properties: {
+            page: { type: 'number' },
+            page_size: { type: 'number' },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: 'relationships_link_product',
+    description: 'Link a related product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to link' },
+        quantity: { type: 'number', description: 'Optional relationship quantity' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id'],
+    },
+  },
+  {
+    name: 'relationships_unlink_product',
+    description: 'Unlink a related product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to unlink' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id'],
+    },
+  },
+  {
+    name: 'relationships_set_quantity',
+    description: 'Set quantity on a related product row.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'Primary product ID' },
+        relationship_id: { type: 'string', description: 'Relationship definition ID' },
+        related_product_id: { type: 'string', description: 'Related product ID to update' },
+        quantity: { type: 'number', description: 'Quantity value to store' },
+      },
+      required: ['product_id', 'relationship_id', 'related_product_id', 'quantity'],
     },
   },
 ];
@@ -373,7 +1261,86 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async products_get_full(args, client) {
+    const productId = args.product_id as string;
+    const productResult = await client.getProduct(productId);
+    const product = productResult.data?.[0];
+
+    if (!product) {
+      return {
+        content: [{ type: 'text', text: `Product not found: ${productId}` }],
+        isError: true,
+      };
+    }
+
+    const familyId = (product as Record<string, unknown>).product_family_id as string | undefined;
+    const [familyResult, variantsResult, categoriesResult, assetsResult] =
+      await Promise.allSettled([
+        familyId ? client.getFamily(familyId) : Promise.resolve(null),
+        client.getProductVariants(productId),
+        client.getProductCategories(productId),
+        client.getProductAssets(productId),
+      ]);
+
+    const errors: string[] = [];
+    const errMsg = (e: unknown) => e instanceof Error ? e.message : String(e);
+
+    const family =
+      familyResult.status === 'fulfilled'
+        ? (familyResult.value?.data?.[0] ?? null)
+        : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
+
+    const variants =
+      variantsResult.status === 'fulfilled'
+        ? (variantsResult.value?.data ?? [])
+        : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
+
+    const categories =
+      categoriesResult.status === 'fulfilled'
+        ? (categoriesResult.value?.data ?? [])
+        : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
+
+    const assets =
+      assetsResult.status === 'fulfilled'
+        ? (assetsResult.value?.data ?? [])
+        : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              product,
+              family,
+              variants,
+              categories,
+              assets,
+              ...(errors.length > 0 ? { _errors: errors } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async products_search(args, client) {
+    // Normalize filter shorthand: LLMs may pass ["field","op","value"] tuples
+    // instead of the required {field, operator, value} objects.
+    if (Array.isArray(args.filters)) {
+      args.filters = (args.filters as unknown[][]).map((group) => {
+        if (!Array.isArray(group)) return group;
+        return group.map((item) => {
+          if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string') {
+            return { field: item[0], operator: item[1], value: item[2] };
+          }
+          return item;
+        });
+      });
+    }
+
     const result = await client.searchProducts(args as Record<string, unknown>);
 
     return {
@@ -391,6 +1358,17 @@ const toolHandlers: Record<string, ToolHandler> = {
           ),
         },
       ],
+    };
+  },
+
+  async products_batch_export(args, client) {
+    const result = await client.batchExportProducts(
+      args as Parameters<typeof client.batchExportProducts>[0]
+    );
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      ...(result.status === 'rejected' ? { isError: true } : {}),
     };
   },
 
@@ -484,6 +1462,127 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async families_create(args, client) {
+    const result = await client.createFamily({
+      name: args.name as string,
+      ...(args.parent_id !== undefined ? { parent_id: args.parent_id as string } : {}),
+    });
+    const family = result.data?.[0];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'created',
+              family: family ? { id: family.id, name: family.name } : undefined,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async families_link_attribute(args, client) {
+    const familyId = args.family_id as string;
+    const attributeLabels = args.attribute_labels as string[];
+
+    await client.linkFamilyAttributes(familyId, attributeLabels);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'linked',
+              family_id: familyId,
+              attribute_labels: attributeLabels,
+              count: attributeLabels.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async families_unlink_attribute(args, client) {
+    const familyId = args.family_id as string;
+    const attributeLabels = args.attribute_labels as string[];
+
+    await client.unlinkFamilyAttributes(familyId, attributeLabels);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'unlinked',
+              family_id: familyId,
+              attribute_labels: attributeLabels,
+              count: attributeLabels.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async families_list_attributes(args, client) {
+    const familyId = args.family_id as string;
+    const result = await client.getFamilyAttributes(familyId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              family_id: familyId,
+              attributes: result.data,
+              count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async families_list_all_attributes(args, client) {
+    const familyId = args.family_id as string;
+    const result = await client.getFamilyAllAttributes(familyId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              family_id: familyId,
+              attributes: result.data,
+              count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async attributes_list(args, client) {
     const { system, custom } = await client.getProductAttributes();
     const includeOptions = args.include_options !== false;
@@ -491,9 +1590,9 @@ const toolHandlers: Record<string, ToolHandler> = {
     const result = {
       system_attributes: system,
       custom_attributes: custom.map((attr) => ({
-        key: attr.field,
+        key: attr.key ?? attr.field,
         label: attr.label,
-        type: attr.type,
+        type: attr.filter_type ?? attr.type,
         ...(includeOptions && attr.options ? { options: attr.options } : {}),
       })),
       summary: {
@@ -517,8 +1616,495 @@ const toolHandlers: Record<string, ToolHandler> = {
           type: 'text',
           text: JSON.stringify(
             {
+              deprecated: true,
+              message: 'Use products_filters, assets_filters, or relationships_filters instead.',
+              replacement_tools: ['products_filters', 'assets_filters', 'relationships_filters'],
+              resource: 'products',
               filters: result.data,
               count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_filters(args, client) {
+    const result = await client.getAvailableFilters();
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              resource: 'products',
+              filters: result.data,
+              count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_filters(args, client) {
+    const result = await client.getAssetFilters();
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              resource: 'assets',
+              filters: result.data,
+              count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_filters(args, client) {
+    const result = await client.getRelationshipFilters();
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              resource: 'relationships',
+              filters: result.data,
+              count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async attributes_get(args, client) {
+    const label = args.label as string;
+    const attr = await client.getAttributeByLabel(label);
+
+    if (!attr) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              id: attr.id,
+              label: attr.label,
+              name: attr.name,
+              type_class: attr.type_class,
+              options: attr.options ?? [],
+              options_count: attr.options?.length ?? 0,
+              groups: attr.groups ?? [],
+              description: attr.description,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async attributes_get_options(args, client) {
+    const label = args.label as string;
+    const options = await client.getAttributeOptions(label);
+
+    if (options === null) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${label}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              label,
+              options,
+              count: options.length,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_set_attribute(args, client) {
+    const productId = args.product_id as string;
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
+    const value = args.value;
+
+    if (!attributeLabel) {
+      return {
+        content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
+        isError: true,
+      };
+    }
+
+    if (value === null) {
+      return {
+        content: [{ type: 'text', text: 'Value cannot be null. Use products_clear_attribute instead.' }],
+        isError: true,
+      };
+    }
+
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
+    const validationError = validateAttributeValue(attribute, value);
+    if (validationError) {
+      return {
+        content: [{ type: 'text', text: validationError }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, {
+      attributes: { [attributeLabel]: value },
+    });
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute write may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              attribute_label: attributeLabel,
+              action: 'set',
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_clear_attribute(args, client) {
+    const productId = args.product_id as string;
+    const attributeLabel = stripAttributesPrefix(args.attribute_label as string);
+
+    if (!attributeLabel) {
+      return {
+        content: [{ type: 'text', text: 'attribute_label cannot be empty' }],
+        isError: true,
+      };
+    }
+
+    const attribute = await client.getAttributeByLabel(attributeLabel);
+    if (!attribute) {
+      return {
+        content: [{ type: 'text', text: `Attribute not found: ${attributeLabel}` }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, {
+      attributes: { [attributeLabel]: null },
+    });
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Attribute clear may have failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              attribute_label: attributeLabel,
+              action: 'cleared',
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_create(args, client) {
+    const sku = args.sku as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+    const categoryIds = args.category_ids as string[] | undefined;
+    const assetIds = args.asset_ids as string[] | undefined;
+
+    const data: Parameters<typeof client.createProduct>[0] = { sku };
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+    if (categoryIds?.length) data.categories = categoryIds.map((id) => ({ id }));
+    if (assetIds?.length) data.assets = assetIds.map((id) => ({ id }));
+
+    const result = await client.createProduct(data);
+    const created = result.data?.[0];
+
+    if (!created?.id) {
+      return {
+        content: [{ type: 'text', text: 'Product creation failed: no ID returned from API' }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: created.id,
+              created: created.created,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_update(args, client) {
+    const productId = args.product_id as string;
+    const label = args.label as string | undefined;
+    const status = args.status as string | undefined;
+    const attributes = args.attributes as Record<string, unknown> | undefined;
+
+    const data: Parameters<typeof client.updateProduct>[1] = {};
+    if (label !== undefined) data.label = label;
+    if (status !== undefined) data.status = status;
+    if (attributes !== undefined) data.attributes = attributes;
+
+    if (Object.keys(data).length === 0) {
+      return {
+        content: [{ type: 'text', text: 'No fields provided to update' }],
+        isError: true,
+      };
+    }
+
+    const result = await client.updateProduct(productId, data);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Product update failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async products_batch_update(args, client) {
+    const result = await client.batchUpdateProducts(args.items, {
+      dryRun: args.dry_run === true,
+      returnSuccesses: args.return_successes === true,
+      maxItems: WORKER_INLINE_MAX_ITEMS,
+      maxBytes: WORKER_INLINE_MAX_BYTES,
+    });
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      ...(result.status === 'rejected' ? { isError: true } : {}),
+    };
+  },
+
+  async products_assign_family(args, client) {
+    const productId = args.product_id as string;
+    const familyId = args.family_id as string;
+
+    const result = await client.assignProductFamily(productId, familyId);
+    const updated = result.data?.[0];
+
+    if (!updated?.id) {
+      return {
+        content: [{ type: 'text', text: `Family assignment failed: no response for ${productId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              id: updated.id,
+              family_id: familyId || null,
+              action: familyId ? 'assigned' : 'unassigned',
+              modified: updated.modified,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_get(args, client) {
+    const assetId = args.asset_id as string;
+    const result = await client.getAsset(assetId);
+    const asset = result.data?.[0];
+
+    if (!asset) {
+      return {
+        content: [{ type: 'text', text: `Asset not found: ${assetId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(asset, null, 2) }],
+    };
+  },
+
+  async assets_search(args, client) {
+    const body: Record<string, unknown> = {};
+
+    if (args.filters !== undefined) {
+      // Normalize [field, operator, value] tuples to objects (parity with products_search).
+      body.filters = Array.isArray(args.filters)
+        ? (args.filters as unknown[]).map((group) =>
+            Array.isArray(group)
+              ? group.map((item) =>
+                  Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string'
+                    ? { field: item[0], operator: item[1], value: item[2] }
+                    : item
+                )
+              : group
+          )
+        : args.filters;
+    }
+    if (args.pagination !== undefined) {
+      body.pagination = args.pagination;
+    }
+    if (args.sort !== undefined) {
+      body.sort = args.sort;
+    }
+
+    const result = await client.searchAssets(body);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              assets: result.data,
+              pagination: result.pagination,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_update(args, client) {
+    const assetId = args.asset_id as string;
+    const filename = args.filename as string | undefined;
+    const categories = args.categories as string[] | undefined;
+
+    if (filename === undefined && categories === undefined) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'Error updating asset: provide at least one of filename or categories',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    await client.updateAsset(assetId, {
+      ...(filename !== undefined ? { filename } : {}),
+      ...(categories !== undefined ? { categories } : {}),
+    });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'updated',
+              asset_id: assetId,
+              ...(filename !== undefined ? { filename } : {}),
+              ...(categories !== undefined ? { categories } : {}),
             },
             null,
             2
@@ -549,6 +2135,87 @@ const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  async assets_link(args, client) {
+    const productId = args.product_id as string;
+    const assetId = args.asset_id as string;
+    const attributeLabel = args.attribute_label as string | undefined;
+
+    const result = await client.linkProductAsset(productId, assetId, attributeLabel);
+    const linked = result.data?.[0];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              asset: linked ? { id: linked.id, name: linked.name, url: linked.url } : { id: assetId },
+              ...(attributeLabel ? { attribute_label: attributeLabel } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async assets_unlink(args, client) {
+    const productId = args.product_id as string;
+    const assetId = args.asset_id as string;
+
+    await client.unlinkProductAsset(productId, assetId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              asset_id: assetId,
+              action: 'unlinked',
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_search(args, client) {
+    const body: Record<string, unknown> = {};
+
+    if (args.pagination !== undefined) {
+      body.pagination = args.pagination;
+    }
+    if (args.query) {
+      body.filters = [[{ field: 'name', operator: 'like', value: args.query }]];
+    }
+
+    const result = await client.searchCategories(body);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              categories: result.data,
+              pagination: result.pagination,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
   async categories_list(args, client) {
     const productId = args.product_id as string;
     const result = await client.getProductCategories(productId);
@@ -561,6 +2228,155 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               categories: result.data,
               count: result.data?.length ?? 0,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async variants_create(args, client) {
+    const parentProductId = args.parent_product_id as string;
+    const result = await client.createVariant(parentProductId, {
+      sku: args.sku as string,
+      ...(args.label !== undefined ? { label: args.label as string } : {}),
+      ...(args.attributes !== undefined ? { attributes: args.attributes as Record<string, unknown> } : {}),
+    });
+    const variant = result.data?.[0];
+
+    if (!variant?.id) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Variant creation under ${parentProductId} returned no confirmed variant. The write may not have been applied.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'created',
+              parent_product_id: parentProductId,
+              variant: variant
+                ? { id: variant.id, sku: variant.sku, label: variant.label }
+                : undefined,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_link(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    const result = await client.linkProductCategory(productId, categoryId);
+    const linked = result.data?.[0];
+
+    if (!linked?.id) {
+      return {
+        content: [{ type: 'text', text: `Category link failed: no response for product ${productId}, category ${categoryId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category: { id: linked.id, name: linked.name, path: linked.path },
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async variants_link(args, client) {
+    const parentProductId = args.parent_product_id as string;
+    const variantProductId = args.variant_product_id as string;
+
+    await client.linkVariant(parentProductId, variantProductId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'linked',
+              parent_product_id: parentProductId,
+              variant_product_id: variantProductId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async variants_unlink(args, client) {
+    const parentProductId = args.parent_product_id as string;
+    const variantProductId = args.variant_product_id as string;
+
+    await client.unlinkVariant(parentProductId, variantProductId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'unlinked',
+              parent_product_id: parentProductId,
+              variant_product_id: variantProductId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async categories_unlink(args, client) {
+    const productId = args.product_id as string;
+    const categoryId = args.category_id as string;
+
+    await client.unlinkProductCategory(productId, categoryId);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              product_id: productId,
+              category_id: categoryId,
+              action: 'unlinked',
             },
             null,
             2
@@ -616,6 +2432,150 @@ const toolHandlers: Record<string, ToolHandler> = {
       ],
     };
   },
+
+  async relationships_get(args, client) {
+    const relationshipId = args.relationship_id as string;
+    const result = await client.getRelationship(relationshipId);
+    const relationship = result.data?.[0];
+
+    if (!relationship) {
+      return {
+        content: [{ type: 'text', text: `Relationship not found: ${relationshipId}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(relationship, null, 2) }],
+    };
+  },
+
+  async relationships_search(args, client) {
+    const body: Record<string, unknown> = {};
+
+    if (args.pagination !== undefined) {
+      body.pagination = args.pagination;
+    }
+    if (args.query) {
+      body.filters = [[{ field: 'label', operator: 'like', value: args.query }]];
+    }
+
+    const result = await client.searchRelationships(body);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              relationships: result.data,
+              pagination: result.pagination,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_link_product(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+    const quantity = args.quantity as number | undefined;
+    if (quantity !== undefined && (!Number.isFinite(quantity) || quantity < 0)) {
+      throw new Error('quantity must be a non-negative number');
+    }
+
+    await client.linkProductRelationship(productId, relationshipId, [
+      {
+        product_id: relatedProductId,
+        ...(quantity !== undefined ? { quantity } : {}),
+      },
+    ]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'linked',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+              ...(quantity !== undefined ? { quantity } : {}),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_unlink_product(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+
+    await client.unlinkProductRelationship(productId, relationshipId, [relatedProductId]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'unlinked',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
+
+  async relationships_set_quantity(args, client) {
+    const productId = args.product_id as string;
+    const relationshipId = args.relationship_id as string;
+    const relatedProductId = args.related_product_id as string;
+    const quantity = args.quantity as number;
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      throw new Error('quantity must be a non-negative number');
+    }
+
+    await client.updateProductRelationship(productId, relationshipId, [
+      { product_id: relatedProductId, quantity },
+    ]);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: true,
+              action: 'quantity_updated',
+              product_id: productId,
+              relationship_id: relationshipId,
+              related_product_id: relatedProductId,
+              quantity,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -630,19 +2590,41 @@ async function handleMcpRequest(
 
   try {
     switch (method) {
+      // Legacy (handshake-based) entry point. Modern clients never send this;
+      // they declare their version per-request in `_meta` instead. Echo the
+      // requested version when we support it, per the legacy lifecycle rules —
+      // the previous hardcoded `2024-11-05` downgraded every client that asked
+      // for something newer.
       case 'initialize': {
         return {
           jsonrpc: '2.0',
           id: id ?? null,
           result: {
-            protocolVersion: '2024-11-05',
+            protocolVersion: negotiateLegacyVersion(params?.protocolVersion),
             capabilities: {
               tools: {},
             },
-            serverInfo: {
-              name: 'plytix-mcp',
-              version: '0.2.0',
+            serverInfo: SERVER_INFO,
+          },
+        };
+      }
+
+      // Modern discovery. Servers MUST implement this; clients MAY call it to
+      // learn supported versions and capabilities before anything else, and
+      // stdio clients use it as the era probe.
+      case 'server/discover': {
+        return {
+          jsonrpc: '2.0',
+          id: id ?? null,
+          result: {
+            supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
+            capabilities: {
+              tools: {},
             },
+            instructions:
+              'Plytix PIM access: look up products by any identifier, read families, ' +
+              'attributes, assets, categories, variants and relationships, and apply ' +
+              'guarded single or batch writes.',
           },
         };
       }
@@ -699,7 +2681,7 @@ async function handleMcpRequest(
               content: [
                 {
                   type: 'text',
-                  text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  text: `Error: ${clientSafeError(error)}`,
                 },
               ],
               isError: true,
@@ -742,10 +2724,41 @@ async function handleMcpRequest(
       id: id ?? null,
       error: {
         code: -32603,
-        message: error instanceof Error ? error.message : 'Internal error',
+        message: clientSafeError(error),
       },
     };
   }
+}
+
+/**
+ * Serialise a modern-era response, stamping results with `resultType` and the
+ * server's identity.
+ *
+ * `status` is supplied by the caller rather than inferred from the error code.
+ * Only the dispatcher knows whether a `-32601` means "this server does not
+ * implement that JSON-RPC method" (`404`, the signal a dual-era client uses to
+ * tell a modern server from an endpoint that does not host this path) or
+ * merely "that tool name does not exist" — which arrives as `-32601` from
+ * `tools/call` but must stay `200`, since `tools/call` itself is implemented.
+ */
+function modernResponse(
+  response: JsonRpcResponse,
+  corsHeaders: Record<string, string>,
+  status = 200
+): Response {
+  const body: JsonRpcResponse =
+    response.result !== undefined
+      ? { ...response, result: decorateModernResult(response.result, SERVER_INFO) }
+      : response;
+
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+      ...corsHeaders,
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -769,12 +2782,392 @@ export default {
       });
     }
 
+    // ── OAuth Discovery ──────────────────────────────────────────
+
+    // Protected Resource Metadata (RFC 9728)
+    if (url.pathname === '/.well-known/oauth-protected-resource') {
+      return new Response(
+        JSON.stringify({
+          resource: url.origin,
+          authorization_servers: [url.origin],
+          bearer_methods_supported: ['header'],
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
+    // Authorization Server Metadata (RFC 8414)
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+      return new Response(
+        JSON.stringify({
+          issuer: url.origin,
+          authorization_endpoint: `${url.origin}/authorize`,
+          token_endpoint: `${url.origin}/token`,
+          registration_endpoint: `${url.origin}/register`,
+          response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+          scopes_supported: ['plytix'],
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
+    // ── Dynamic Client Registration (RFC 7591) ──────────────────
+
+    if (url.pathname === '/register' && request.method === 'POST') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      if (!(await rateLimit(env.OAUTH_KV, 'register', clientIpOf(request), 10, 3600))) {
+        return rateLimitedResponse(3600, corsHeaders);
+      }
+
+      try {
+        const regBody = (await request.json()) as Record<string, unknown>;
+
+        // Validate redirect_uris before storing anything: must be 1-10 strings,
+        // each https (or http on localhost). The authorize-time exact match is
+        // the primary control; this keeps junk and dangerous schemes out of KV.
+        const redirectUris = regBody.redirect_uris;
+        if (
+          !Array.isArray(redirectUris) ||
+          redirectUris.length === 0 ||
+          redirectUris.length > 10 ||
+          !redirectUris.every((u) => typeof u === 'string' && isAcceptableRedirectUri(u))
+        ) {
+          return new Response(
+            JSON.stringify({
+              error: 'invalid_client_metadata',
+              error_description:
+                'redirect_uris must be 1-10 https URLs (http allowed only for localhost)',
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
+
+        const clientName =
+          typeof regBody.client_name === 'string' ? regBody.client_name.trim().slice(0, 100) : '';
+
+        const clientId = generateToken(16);
+        const authMethod = (regBody.token_endpoint_auth_method as string) || 'none';
+        const clientSecret = authMethod === 'none' ? undefined : generateToken(32);
+
+        const registration = {
+          client_id: clientId,
+          ...(clientSecret ? { client_secret: clientSecret } : {}),
+          redirect_uris: redirectUris,
+          client_name: clientName,
+          token_endpoint_auth_method: authMethod,
+          grant_types: ['authorization_code'],
+          response_types: ['code'],
+        };
+
+        await env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify(registration));
+
+        return new Response(JSON.stringify(registration), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      } catch {
+        return new Response(
+          JSON.stringify({ error: 'invalid_client_metadata' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+    }
+
+    // ── Authorization Endpoint ───────────────────────────────────
+
+    if (url.pathname === '/authorize' && request.method === 'GET') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const clientId = url.searchParams.get('client_id') || '';
+      const redirectUri = url.searchParams.get('redirect_uri') || '';
+      const state = url.searchParams.get('state') || '';
+      const codeChallenge = url.searchParams.get('code_challenge') || '';
+      const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
+      const scope = url.searchParams.get('scope') || '';
+      const responseType = url.searchParams.get('response_type') || '';
+
+      if (responseType !== 'code') {
+        return new Response(
+          JSON.stringify({ error: 'unsupported_response_type' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (!clientId || !redirectUri || !codeChallenge) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'Missing required parameters: client_id, redirect_uri, code_challenge' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Only S256 PKCE is supported (and advertised in metadata). Reject any
+      // other method up front rather than silently treating it as S256.
+      if (codeChallengeMethod !== 'S256') {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'code_challenge_method must be S256' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Reject before rendering the credential form unless the redirect_uri is
+      // registered to this client. Without this the worker's own login page
+      // becomes a credential-harvesting oracle: an attacker who initiates the
+      // flow with their own redirect_uri + PKCE challenge would receive an auth
+      // code (and thus the victim's credentials) at a URL they control.
+      const registration = await getClientRegistration(env.OAUTH_KV, clientId);
+      if (!redirectUriMatches(registration, redirectUri)) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const clientName =
+        typeof registration?.client_name === 'string' ? registration.client_name : '';
+
+      return new Response(
+        renderAuthorizePage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope, clientName }),
+        { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      );
+    }
+
+    if (url.pathname === '/authorize' && request.method === 'POST') {
+      const oauthKv = env.OAUTH_KV;
+      if (!oauthKv) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const tokenSecret = env.OAUTH_TOKEN_SECRET;
+      if (!tokenSecret) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth credential encryption not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Each POST forwards submitted credentials to Plytix's auth endpoint —
+      // without a limit this is an unthrottled credential-testing oracle.
+      if (!(await rateLimit(oauthKv, 'authorize', clientIpOf(request), 10, 300))) {
+        return rateLimitedResponse(300);
+      }
+
+      const formData = await request.formData();
+      const clientId = (formData.get('client_id') as string) || '';
+      const redirectUri = (formData.get('redirect_uri') as string) || '';
+      const state = (formData.get('state') as string) || '';
+      const codeChallenge = (formData.get('code_challenge') as string) || '';
+      const codeChallengeMethod = (formData.get('code_challenge_method') as string) || '';
+      const scope = (formData.get('scope') as string) || '';
+      const apiKey = (formData.get('api_key') as string) || '';
+      const apiPassword = (formData.get('api_password') as string) || '';
+
+      // Re-validate the redirect_uri against the registered client — never
+      // trust the hidden form field. On failure return an error directly; do
+      // NOT redirect to the supplied URL (that redirect is the exfil sink).
+      if (!(await isRegisteredRedirectUri(oauthKv, clientId, redirectUri))) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Enforce S256 PKCE (matches advertised metadata).
+      if (codeChallengeMethod !== 'S256' || !codeChallenge) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'code_challenge with method S256 is required' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (!apiKey || !apiPassword) {
+        return new Response(
+          renderAuthorizePage({
+            clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+            error: 'Please enter both API key and password.',
+          }),
+          { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+        );
+      }
+
+      // Validate credentials against Plytix
+      try {
+        const authUrl = env.PLYTIX_AUTH_URL || 'https://auth.plytix.com/auth/api/get-token';
+        const authResponse = await fetch(authUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: apiKey, api_password: apiPassword }),
+        });
+
+        if (!authResponse.ok) {
+          return new Response(
+            renderAuthorizePage({
+              clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+              error: 'Invalid Plytix credentials. Please check your API key and password.',
+            }),
+            { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+          );
+        }
+      } catch {
+        return new Response(
+          renderAuthorizePage({
+            clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope,
+            error: 'Could not verify credentials. Please try again.',
+          }),
+          { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+        );
+      }
+
+      // Generate auth code and store with ENCRYPTED credentials (10-min TTL).
+      const code = generateToken(32);
+      const encCreds = await encryptCreds({ api_key: apiKey, api_password: apiPassword }, tokenSecret);
+      await oauthKv.put(
+        `code:${code}`,
+        JSON.stringify({
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          code_challenge: codeChallenge,
+          code_challenge_method: codeChallengeMethod,
+          enc_creds: encCreds,
+        }),
+        { expirationTtl: 600 } // 10 minute TTL for auth codes
+      );
+
+      // Redirect back to the (validated) client with the auth code.
+      const redirect = new URL(redirectUri);
+      redirect.searchParams.set('code', code);
+      if (state) redirect.searchParams.set('state', state);
+
+      return Response.redirect(redirect.toString(), 302);
+    }
+
+    // ── Token Endpoint ───────────────────────────────────────────
+
+    if (url.pathname === '/token' && request.method === 'POST') {
+      if (!env.OAUTH_KV) {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'OAuth storage not configured' }),
+          { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      if (!(await rateLimit(env.OAUTH_KV, 'token', clientIpOf(request), 30, 300))) {
+        return rateLimitedResponse(300, corsHeaders);
+      }
+
+      // Parse body (supports both form-encoded and JSON)
+      let tokenParams: Record<string, string>;
+      const contentType = request.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        tokenParams = (await request.json()) as Record<string, string>;
+      } else {
+        const formData = await request.formData();
+        tokenParams = {
+          grant_type: (formData.get('grant_type') as string) || '',
+          code: (formData.get('code') as string) || '',
+          code_verifier: (formData.get('code_verifier') as string) || '',
+          client_id: (formData.get('client_id') as string) || '',
+          redirect_uri: (formData.get('redirect_uri') as string) || '',
+        };
+      }
+
+      if (tokenParams.grant_type !== 'authorization_code') {
+        return new Response(
+          JSON.stringify({ error: 'unsupported_grant_type' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      const { code, code_verifier, client_id: tokenClientId, redirect_uri: tokenRedirectUri } = tokenParams;
+
+      if (!code || !code_verifier) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_request', error_description: 'Missing code or code_verifier' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Look up auth code
+      const codeData = (await env.OAUTH_KV.get(`code:${code}`, 'json')) as {
+        client_id: string;
+        redirect_uri: string;
+        code_challenge: string;
+        enc_creds: string;
+      } | null;
+
+      if (!codeData) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Delete the code immediately (one-time use)
+      await env.OAUTH_KV.delete(`code:${code}`);
+
+      // Validate client_id and redirect_uri match
+      if (codeData.client_id !== tokenClientId || codeData.redirect_uri !== tokenRedirectUri) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Client ID or redirect URI mismatch' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Verify PKCE (S256)
+      const expectedChallenge = await computeS256(code_verifier);
+      if (!timingSafeEqualStr(expectedChallenge, codeData.code_challenge)) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // Generate access token. Carry the already-encrypted credential blob
+      // from the auth code straight into the token record (same key, so no
+      // decrypt/re-encrypt needed) and bound the token's lifetime.
+      const accessToken = generateToken(32);
+      const TOKEN_TTL_SECONDS = resolveTokenTtlSeconds(env.OAUTH_TOKEN_TTL_SECONDS);
+      await env.OAUTH_KV.put(
+        `token:${accessToken}`,
+        JSON.stringify({
+          enc_creds: codeData.enc_creds,
+          client_id: codeData.client_id,
+          created_at: new Date().toISOString(),
+        }),
+        { expirationTtl: TOKEN_TTL_SECONDS }
+      );
+
+      return new Response(
+        JSON.stringify({
+          access_token: accessToken,
+          token_type: 'bearer',
+          expires_in: TOKEN_TTL_SECONDS,
+        }),
+        { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+      );
+    }
+
     // Server info
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(
         JSON.stringify({
           name: 'plytix-mcp',
-          version: '0.2.0',
+          version: '0.3.3',
           description: 'Remote MCP server for Plytix PIM',
           endpoints: {
             mcp: '/mcp',
@@ -783,13 +3176,23 @@ export default {
           authentication: {
             methods: [
               {
+                type: 'oauth',
+                endpoints: {
+                  metadata: '/.well-known/oauth-authorization-server',
+                  authorize: '/authorize',
+                  token: '/token',
+                  register: '/register',
+                },
+                note: 'For Claude web and other OAuth-capable MCP clients',
+              },
+              {
                 type: 'headers',
                 required: ['X-Plytix-API-Key', 'X-Plytix-API-Password'],
               },
               {
                 type: 'bearer',
                 format: 'Bearer <api_key>:<api_password>',
-                note: 'For Craft Agents and other MCP clients',
+                note: 'For MCP clients that send credentials via an Authorization header',
               },
             ],
           },
@@ -800,13 +3203,58 @@ export default {
       );
     }
 
+    // The 2026-07-28 revision removed the standalone GET stream and the
+    // DELETE session teardown. Answer both explicitly so an older client gets
+    // the documented signal instead of a generic "not found".
+    if (url.pathname === '/mcp' && (request.method === 'GET' || request.method === 'DELETE')) {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32600,
+            message:
+              'This MCP endpoint accepts POST only. Standalone SSE streams and session ' +
+              'teardown were removed in protocol revision 2026-07-28.',
+          },
+        }),
+        {
+          status: 405,
+          headers: { 'Content-Type': 'application/json', Allow: 'POST, OPTIONS', ...corsHeaders },
+        }
+      );
+    }
+
     // MCP endpoint
     if (url.pathname === '/mcp' && request.method === 'POST') {
       // Parse JSON-RPC request first to check if auth is needed
+      const MAX_BODY_BYTES = 256 * 1024;
+      const tooLargeResponse = () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            error: { code: -32600, message: `Request body too large (max ${MAX_BODY_BYTES} bytes)` },
+          }),
+          { status: 413, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+
+      // Reject oversized payloads up front when Content-Length is present (avoids decoding
+      // the whole body just to reject it). Content-Length counts wire bytes, not characters.
+      const contentLength = Number(request.headers.get('Content-Length'));
+      if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+        return tooLargeResponse();
+      }
+
       let body: JsonRpcRequest | JsonRpcRequest[];
       let bodyText: string;
       try {
         bodyText = await request.text();
+        // Measure decoded body by UTF-8 byte length, not String.length (UTF-16 code units).
+        // A multi-byte payload can exceed the cap on the wire while String.length stays under it.
+        if (new TextEncoder().encode(bodyText).length > MAX_BODY_BYTES) {
+          return tooLargeResponse();
+        }
         body = JSON.parse(bodyText);
       } catch {
         return new Response(
@@ -822,29 +3270,164 @@ export default {
         );
       }
 
-      // Methods that don't require authentication (for MCP client discovery)
-      const publicMethods = ['initialize', 'notifications/initialized', 'tools/list'];
-      const requests = Array.isArray(body) ? body : [body];
+      // A body can be valid JSON without being a JSON-RPC message: `null`, a
+      // bare string, a number, or a batch containing any of those. Reject it
+      // here with a controlled Invalid Request rather than letting era
+      // detection or the dispatcher dereference it and reject the Worker
+      // promise with a TypeError.
+      const isMessageShaped = (value: unknown): boolean =>
+        value !== null && typeof value === 'object' && !Array.isArray(value);
+
+      if (
+        !isMessageShaped(body) &&
+        !(Array.isArray(body) && body.every((entry) => isMessageShaped(entry)))
+      ) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            error: {
+              code: -32600,
+              message:
+                'Invalid Request: body must be a JSON-RPC request object, or an array of them',
+            },
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+        );
+      }
+
+      // JSON-RPC notifications (no `id` member) MUST NOT receive a response
+      // object. Answering them with `{"id":null,"result":{}}` breaks strict
+      // clients — Codex's rmcp transport fails to deserialize it and drops
+      // the connection ("data did not match any variant of untagged enum
+      // JsonRpcMessage"). Per the MCP streamable-HTTP spec, acknowledge
+      // notifications with 202 Accepted and an empty body. They are exempt
+      // from the auth gate below: they carry no response, so there is
+      // nothing to protect, and this server processes no notification
+      // side effects.
+      // A notification requires a `method`; a no-id object WITHOUT one is a
+      // malformed request and must fall through to the handler so the client
+      // gets an error response instead of a silent 202.
+      const isNotification = (req: JsonRpcRequest) =>
+        req !== null &&
+        typeof req === 'object' &&
+        !('id' in req) &&
+        typeof req.method === 'string';
+
+      if (!Array.isArray(body) && isNotification(body)) {
+        return new Response(null, { status: 202, headers: corsHeaders });
+      }
+
+      // ── Protocol era ─────────────────────────────────────────────
+      // A request carrying modern per-request `_meta` (or naming the modern
+      // version in its `MCP-Protocol-Version` header) is served under the
+      // 2026-07-28 revision, with its strict header mirroring and HTTP status
+      // codes. Everything else keeps today's legacy behaviour — including
+      // JSON-RPC batches, which the modern transport does not permit at all.
+      let isModern = false;
+      if (Array.isArray(body)) {
+        // The modern transport permits only a single request or notification
+        // per POST. Serving a modern batch under legacy semantics would skip
+        // header/`_meta` validation altogether, so reject it outright.
+        if (isModernBatch(body, request.headers)) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: {
+                code: -32600,
+                message:
+                  'Invalid Request: JSON-RPC batches are not permitted in protocol revision ' +
+                  `${MODERN_PROTOCOL_VERSION}; send one request or notification per POST`,
+              },
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
+      } else {
+        isModern = isModernRequest(body, request.headers);
+        if (isModern) {
+          const validation = validateModernRequest(body, request.headers);
+          if (!validation.ok) {
+            return new Response(
+              JSON.stringify({ jsonrpc: '2.0', id: body.id ?? null, error: validation.error }),
+              {
+                status: validation.status,
+                headers: { 'Content-Type': 'application/json', ...corsHeaders },
+              }
+            );
+          }
+
+          // Resolved before the auth gate: an unimplemented method has nothing
+          // to protect, and answering it with 401 would hide the `404`/`-32601`
+          // signal the transport requires here.
+          if (!MODERN_METHODS.has(body.method)) {
+            return modernResponse(
+              {
+                jsonrpc: '2.0',
+                id: body.id ?? null,
+                error: {
+                  code: ERROR_METHOD_NOT_FOUND,
+                  message: `Method not found: ${body.method}`,
+                },
+              },
+              corsHeaders,
+              404
+            );
+          }
+        }
+      }
+
+      // Methods that don't require authentication (for MCP client discovery).
+      // Notifications are excluded from the gate check — they never produce
+      // a response, so an all-notification batch must not 401.
+      const publicMethods = [
+        'initialize',
+        'server/discover',
+        'notifications/initialized',
+        'tools/list',
+      ];
+      const requests = (Array.isArray(body) ? body : [body]).filter(
+        (req) => !isNotification(req)
+      );
       const allPublic = requests.every(
         (req) => req && typeof req === 'object' && typeof req.method === 'string' && publicMethods.includes(req.method)
       );
 
       // Extract API credentials from headers
-      // Supports two formats:
+      // Supports three formats:
       // 1. Custom headers: X-Plytix-API-Key and X-Plytix-API-Password
-      // 2. Bearer token: Authorization: Bearer <api_key>:<api_password>
+      // 2. Bearer token (BYOK): Authorization: Bearer <api_key>:<api_password>
+      // 3. Bearer token (OAuth): Authorization: Bearer <oauth_access_token>
       let apiKey = request.headers.get('X-Plytix-API-Key');
       let apiPassword = request.headers.get('X-Plytix-API-Password');
 
-      // Fallback to Bearer token format for Craft Agents compatibility
+      // Fallback to the Authorization header for clients that can't send custom headers.
+      // Bearer <key>:<password> = BYOK; Bearer <opaque> = OAuth access token (resolved via KV).
       if (!apiKey || !apiPassword) {
         const authHeader = request.headers.get('Authorization');
         if (authHeader?.startsWith('Bearer ')) {
-          const token = authHeader.slice(7); // Remove 'Bearer ' prefix
+          const token = authHeader.slice(7);
           const colonIndex = token.indexOf(':');
           if (colonIndex > 0) {
+            // BYOK format: key:password
             apiKey = token.slice(0, colonIndex);
             apiPassword = token.slice(colonIndex + 1);
+          } else if (env.OAUTH_KV && env.OAUTH_TOKEN_SECRET) {
+            // OAuth token — resolve the encrypted credential blob from KV.
+            const tokenData = (await env.OAUTH_KV.get(`token:${token}`, 'json')) as {
+              enc_creds?: string;
+            } | null;
+            if (tokenData?.enc_creds) {
+              try {
+                const creds = await decryptCreds(tokenData.enc_creds, env.OAUTH_TOKEN_SECRET);
+                apiKey = creds.api_key;
+                apiPassword = creds.api_password;
+              } catch {
+                // Tampered or undecryptable blob — leave credentials unset so
+                // the request falls through to the 401 below.
+              }
+            }
           }
         }
       }
@@ -858,12 +3441,16 @@ export default {
             error: {
               code: -32600,
               message:
-                'Missing Plytix API credentials. Provide either X-Plytix-API-Key and X-Plytix-API-Password headers, or Authorization: Bearer <api_key>:<api_password>',
+                'Authentication required. Use OAuth, provide X-Plytix-API-Key/X-Plytix-API-Password headers, or Authorization: Bearer <api_key>:<api_password>',
             },
           }),
           {
             status: 401,
-            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+              ...corsHeaders,
+            },
           }
         );
       }
@@ -896,18 +3483,37 @@ export default {
         }
       }
 
-      // Handle batch requests
+      // Handle batch requests (notifications already filtered out of
+      // `requests`; they get no response entry)
       if (Array.isArray(body)) {
+        if (body.length > 50) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32600, message: 'Batch too large (max 50 requests)' },
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+          );
+        }
+        // All-notification batch: nothing to respond to.
+        if (requests.length === 0) {
+          return new Response(null, { status: 202, headers: corsHeaders });
+        }
         const responses = await Promise.all(
-          body.map((req) => handleMcpRequest(req, client))
+          requests.map((req) => handleMcpRequest(req, client))
         );
         return new Response(JSON.stringify(responses), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders },
         });
       }
 
-      // Handle single request
+      // Handle single request (single notifications were acknowledged with
+      // 202 before the auth gate)
       const response = await handleMcpRequest(body, client);
+      if (isModern) {
+        return modernResponse(response, corsHeaders);
+      }
       return new Response(JSON.stringify(response), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });

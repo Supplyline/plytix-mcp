@@ -1,0 +1,125 @@
+PROGRESS LOG — plytix-mcp
+=========================
+Session handoff notes. Newest entry on top.
+
+
+2026-06-10/11 — Overnight /improve run: audit → pressure-test → 3 PRs
+----------------------------------------------------------------------
+Goal (Eric, going to bed): run /improve, pressure-test every finding + the
+bulk spec/change-order, write plans, fix/implement as far as possible.
+
+PROCESS LESSON (saved to agent memory): the audit started against a local
+main that was 4 commits BEHIND origin — the batch update/export feature
+(PRs #24–#27, v0.3.0–0.3.3) had already shipped the day before. Everything
+was reconciled mid-run. Always `git fetch` + check open PRs before auditing.
+
+Open PRs for morning review (all CI-green at time of writing, independent,
+any merge order; see each PR body for vetting notes):
+- PR #28 fix/stdio-client-hardening — ports worker client hardening to the
+  stdio client (pagination cap, batched+deduped attribute cache, failure
+  threshold), lookup cfg undefined fix, CI worker typecheck, 9 client tests.
+- PR #29 feat/oauth-abuse-hardening — KV rate limits on /authorize,
+  /register, /token; redirect_uri scheme validation at registration; consent
+  page shows client_name + redirect host; token TTL 30d → 7d default
+  (OAUTH_TOKEN_TTL_SECONDS); timing-safe PKCE compare; 9 new OAuth tests.
+- PR #30 fix/batch-review-findings — post-ship review of the batch feature
+  (2 parallel reviewers vs SPECs + ETL handoff): SKU chunking fixed to
+  spec'd 100 (was page_size-sized), normalizePositiveInt clamps, dry-run
+  skipped count fixed, version constants synced to 0.3.3, ~10 contractual
+  tests added (manifest read failures, worker caps, error-parser shapes,
+  byte-cap rejection). Also: REST-EVIDENCE addendum, handoff doc tracked,
+  plans/ directory (audit record + queued plans 004/005/006).
+
+Bulk/batch spec pressure-test verdict: the shipped batch design already
+resolved every amendment derived from the ETL handoff (both-keys items,
+manifest-from-disk, dry-run, per-sku failures, no job handles). New
+evidence: official Postman collection has NO bulk endpoints; /api/v1/jobs/*
+EXISTS but is 403 permission-gated for this account's API credential —
+if the async path is ever pursued, enable that permission first.
+
+Queued plans (plans/README.md): 004 unify dual-surface core (L), 005
+attribute-cache N+1 collapse (S), 006 deps refresh (S). Rejected-findings
+ledger in plans/README.md prevents re-auditing dead ends (CSRF on
+/authorize, products_get_full "bloat", README tool counts, etc.).
+
+Operator items before the 620-SKU LMI-PD push: 4-SKU live batch
+verification (SPEC "Live verification"), then the manifest run via
+products_batch_update_manifest (dry_run first).
+
+
+2026-06-11 — 4-SKU live verification COMPLETE (PRs #28-#30 merged)
+------------------------------------------------------------------
+All three overnight PRs merged to main. Ran the real batch code path
+(client.batchUpdateProducts, same code the stdio tools call) against live
+Plytix with .env creds. SKUs: LMI-PD041929NI (5e0110bb86228d42be6122cc),
+LMI-PD041A28HI (5e0110bd86228d42be6122d6), LMI-PD041A28AI
+(5e0110bc86228d42be6122d4), LMI-PD041 (5e052aa9b780b3e62bdf86ae).
+
+- Dry-run (zero writes): 3 resolve+verify OK; 1 with a deliberately-wrong
+  product_id → stage:"verify" failure, per-row keyed by sku. summary
+  invariant held (succeeded 0 + failed 1 + skipped 3 = total 4).
+- Real no-op PATCH (status:"Completed" written back to already-Completed
+  rows): 4/4 succeeded, per-row successes keyed by sku, summary 4/0/0.
+- FINDING: a same-value status PATCH is a true server-side no-op — Plytix
+  did NOT bump `modified` (read-back of LMI-PD041929NI still
+  2026-06-10T13:59:27). Reassuring for idempotent re-runs; note the REAL
+  backfill writes CHANGED box_n/opt_n/google_detail values, which WILL bump
+  modified (expected).
+
+Deployment state to be aware of:
+- Remote worker NOT redeployed since the merge — live `plytix` worker still
+  exposes only single products_update, no batch tools. Redeploy
+  (`npm run deploy`) only when ready (also pushes #29 OAuth hardening live);
+  it gives inline products_batch_update on web/mobile but NOT the manifest
+  backfill.
+- The 620-SKU backfill must run via STDIO (products_batch_update_manifest is
+  stdio-only — worker has no filesystem) OR an ETL-side node script calling
+  client.batchUpdateProducts(manifest.items, {...}) directly. The async
+  /api/v1/jobs permission is NOT needed (tools use the documented PATCH loop).
+
+
+2026-06-01 — "Could not attach to MCP server plytix" investigation + hardening
+------------------------------------------------------------------------------
+Trigger: after a reboot, Claude (Desktop) showed "Could not attach to MCP server plytix".
+
+Findings:
+- `plytix` is the REMOTE Cloudflare Worker, reached via an mcp-remote stdio→HTTP
+  bridge (~/.claude/mcp-remote-plytix.sh → npx -y mcp-remote → worker /mcp). It is
+  configured in Claude Desktop's claude_desktop_config.json, NOT ~/.claude.json — which
+  is why `claude mcp list` doesn't show it but a Desktop/local-agent session has the tools.
+- Root cause of the toast: transient cold-start race — `npx mcp-remote@latest` doing a
+  registry round-trip before the network was up at reboot. Worker itself was healthy
+  (HTTP 200, <1s). Self-heals on relaunch. NOT related to the recent worker-auth commit
+  (b6062eb didn't touch the auth gate).
+- Verified BOTH transports work end-to-end: remote worker suite 10/10, local stdio
+  handshake + authed round-trip OK.
+- Security: confirmed the worker's auth model is intentional and intact — initialize/
+  tools/list are public (200), tools/call without creds is rejected (-32600). No PIM leak.
+
+Changes made:
+- REPO (PR): test-worker.js — replaced the stale "initialize must 401" assertion with
+  (a) "public handshake initialize → 200" and (b) a new "tools/call without creds must be
+  rejected" auth-boundary regression test. Suite now 10/10; unit tests 33/33.
+- REPO: docs/solutions/integration-issues/mcp-attach-failure-and-transports.md (diagnosis).
+- LOCAL (not repo): moved Plytix creds out of argv. Secrets now live in
+  ~/.claude/plytix-mcp.env (chmod 600); wrapper sources it; Desktop config passes the
+  literal ${PLYTIX_API_KEY}/${PLYTIX_API_PASSWORD} placeholders, which mcp-remote
+  substitutes from env at request time. Verified: ps shows only placeholders, never the
+  secret; the exact config entry still authenticates with a minimal env. Old config
+  backed up to claude_desktop_config.json.pre-plytix-secrets-fix.bak (chmod 600).
+
+Durable startup fix (applied 2026-06-01, approved):
+- Pinning the npx spec does NOT help (npx caches by exact spec string; a pinned spec
+  still hits the registry). So removed npx from the boot path entirely:
+  `npm install -g mcp-remote@0.1.38 --prefix ~/.claude/mcp-tools` and pointed the
+  wrapper at the absolute binary (~/.claude/mcp-tools/bin/mcp-remote), with an npx
+  fallback if that install ever goes missing. Startup is now a local `node` exec —
+  no npm-registry round-trip — so the cold-boot race is gone. Verified: real config
+  entry connects in ~2.3s, authenticates, secret stays a placeholder in argv.
+  (mcp-remote@0.1.38: latest, published 2026-02-05, maintainers threepointone/geelen,
+  ~338k weekly downloads.)
+
+Next steps / open:
+- The repo .env still holds real creds for local stdio testing (gitignored) — fine.
+- If ~/.claude/mcp-tools is ever wiped, the wrapper falls back to npx automatically;
+  re-run the npm install above to restore the pinned binary.

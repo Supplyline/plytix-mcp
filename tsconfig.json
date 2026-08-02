@@ -28,6 +28,9 @@
     "node_modules",
     "dist",
     "**/*.test.ts",
-    "**/*.spec.ts"
+    "**/*.spec.ts",
+    "src/worker.ts",
+    "src/worker-client.ts",
+    "src/worker-lookup.ts"
   ]
 }

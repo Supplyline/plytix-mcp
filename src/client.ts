@@ -20,11 +20,34 @@ import type {
   PlytixAsset,
   PlytixCategory,
   PlytixFamily,
+  PlytixFamilyAttribute,
   PlytixFilterDefinition,
   PlytixAttributeDetail,
+  PlytixRelationshipDefinition,
   RateLimitInfo,
+  BatchUpdateMetadata,
+  BatchUpdateResult,
+  ProductBatchExportInput,
+  ProductBatchExportResult,
+  ProductBatchExportToFileInput,
 } from './types.js';
 import { PlytixError } from './types.js';
+import {
+  STDIO_INLINE_MAX_ITEMS,
+  type BatchValidationOptions,
+} from './batch/helpers.js';
+import {
+  executeBatchUpdate,
+  type ExecuteBatchUpdateOptions,
+  type ResolvedProductRef,
+} from './batch/runner.js';
+import {
+  STDIO_EXPORT_INLINE_MAX_BYTES,
+  STDIO_EXPORT_INLINE_MAX_ROWS,
+  executeBatchExport,
+  type ExecuteBatchExportOptions,
+} from './batch/export.js';
+import { exportProductsToFile } from './batch/export-file.js';
 
 const DEFAULT_CONFIG = {
   baseUrl: 'https://pim.plytix.com',
@@ -36,6 +59,7 @@ export class PlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<PlytixClientConfig>;
   private attributeCache?: { byLabel: Map<string, PlytixAttributeDetail>; expires: number };
+  private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
 
   constructor(config?: Partial<PlytixClientConfig>) {
     this.config = {
@@ -223,6 +247,77 @@ export class PlytixClient {
     });
   }
 
+  async resolveProductIdsBySku(skus: string[]): Promise<Map<string, ResolvedProductRef[]>> {
+    const resolved = new Map<string, ResolvedProductRef[]>();
+    const uniqueSkus = Array.from(new Set(skus.filter(Boolean)));
+    const pageSize = 100;
+
+    for (let i = 0; i < uniqueSkus.length; i += pageSize) {
+      const batch = uniqueSkus.slice(i, i + pageSize);
+      let page = 1;
+      let totalPages = 1;
+
+      do {
+        const result = await this.searchProducts({
+          filters: [[{ field: 'sku', operator: 'in', value: batch }]],
+          attributes: ['sku'],
+          pagination: { page, page_size: pageSize },
+        });
+
+        for (const product of result.data ?? []) {
+          if (!product.sku) continue;
+          resolved.set(product.sku, [
+            ...(resolved.get(product.sku) ?? []),
+            { id: product.id, sku: product.sku },
+          ]);
+        }
+
+        totalPages = Math.max(result.pagination?.pages ?? 1, 1);
+        page += 1;
+      } while (page <= totalPages);
+    }
+
+    return resolved;
+  }
+
+  async batchUpdateProducts(
+    items: unknown,
+    options: Partial<ExecuteBatchUpdateOptions> & {
+      metadata?: BatchUpdateMetadata;
+      maxItems?: BatchValidationOptions['maxItems'];
+    } = {}
+  ): Promise<BatchUpdateResult> {
+    return executeBatchUpdate(this, items, {
+      maxItems: options.maxItems ?? STDIO_INLINE_MAX_ITEMS,
+      maxBytes: options.maxBytes,
+      dryRun: options.dryRun,
+      metadata: options.metadata,
+      concurrency: options.concurrency,
+      requestDelayMs: options.requestDelayMs,
+      returnSuccesses: options.returnSuccesses,
+    });
+  }
+
+  async batchExportProducts(
+    input: ProductBatchExportInput,
+    options: Partial<ExecuteBatchExportOptions> = {}
+  ): Promise<ProductBatchExportResult> {
+    return executeBatchExport(this, input, {
+      mode: 'inline',
+      maxRows: options.maxRows ?? STDIO_EXPORT_INLINE_MAX_ROWS,
+      maxResponseBytes: options.maxResponseBytes ?? STDIO_EXPORT_INLINE_MAX_BYTES,
+      concurrency: options.concurrency,
+      requestDelayMs: options.requestDelayMs,
+      metadata: options.metadata,
+    });
+  }
+
+  async batchExportProductsToFile(
+    input: ProductBatchExportToFileInput
+  ): Promise<ProductBatchExportResult> {
+    return exportProductsToFile(this, input);
+  }
+
   async getProduct(id: string): Promise<PlytixResult<PlytixProduct>> {
     return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(id)}`);
   }
@@ -258,12 +353,68 @@ export class PlytixClient {
     );
   }
 
+  async createFamily(data: {
+    name: string;
+    parent_id?: string;
+  }): Promise<PlytixResult<PlytixFamily>> {
+    return this.request<PlytixFamily>('/api/v1/product_families', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async linkFamilyAttributes(
+    familyId: string,
+    attributeLabels: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/link`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ attributes: attributeLabels }),
+      }
+    );
+  }
+
+  async unlinkFamilyAttributes(
+    familyId: string,
+    attributeLabels: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/unlink`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ attributes: attributeLabels }),
+      }
+    );
+  }
+
+  async getFamilyAttributes(familyId: string): Promise<PlytixResult<PlytixFamilyAttribute>> {
+    return this.request<PlytixFamilyAttribute>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes`
+    );
+  }
+
+  async getFamilyAllAttributes(familyId: string): Promise<PlytixResult<PlytixFamilyAttribute>> {
+    return this.request<PlytixFamilyAttribute>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/all_attributes`
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Attributes & Filters
   // ─────────────────────────────────────────────────────────────
 
   async getAvailableFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
-    return this.request<PlytixFilterDefinition>('/api/v1/products/search/filters');
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/product');
+  }
+
+  async getAssetFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/asset');
+  }
+
+  async getRelationshipFilters(): Promise<PlytixResult<PlytixFilterDefinition>> {
+    return this.request<PlytixFilterDefinition>('/api/v1/filters/relationships');
   }
 
   /**
@@ -278,11 +429,12 @@ export class PlytixClient {
 
       if (filtersResult.data) {
         for (const filter of filtersResult.data) {
-          if (filter.field) {
-            if (filter.field.startsWith('attributes.')) {
+          const field = filter.key ?? filter.field;
+          if (field) {
+            if (field.startsWith('attributes.')) {
               custom.push(filter);
             } else {
-              system.push(filter.field);
+              system.push(field);
             }
           }
         }
@@ -303,10 +455,11 @@ export class PlytixClient {
    * Use getAttribute() to get full details including options.
    */
   async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
     const attrIds: string[] = [];
     let page = 1;
 
-    while (true) {
+    while (page <= MAX_PAGES) {
       const result = await this.request<{ id: string; filter_type?: string }>(
         '/api/v1/attributes/product/search',
         {
@@ -340,28 +493,63 @@ export class PlytixClient {
   /**
    * Build attribute cache indexed by label. Fetches all attributes once,
    * then caches for 5 minutes to avoid N+1 queries on repeated lookups.
+   * Deduplicates concurrent callers via shared promise.
    */
   private async buildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
-    const now = Date.now();
-    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
     // Return cached if still valid
-    if (this.attributeCache && now < this.attributeCache.expires) {
+    if (this.attributeCache && Date.now() < this.attributeCache.expires) {
       return this.attributeCache.byLabel;
     }
+    if (this.attributeCachePromise) return this.attributeCachePromise;
 
-    // Fetch all attribute IDs, then details in parallel (graceful partial failure)
+    this.attributeCachePromise = this.doBuildAttributeCache();
+    try {
+      return await this.attributeCachePromise;
+    } finally {
+      this.attributeCachePromise = undefined;
+    }
+  }
+
+  private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
     const attrIds = await this.searchAttributeIds();
-    const results = await Promise.allSettled(attrIds.map((id) => this.getAttributeById(id)));
+
+    if (attrIds.length === 0) {
+      throw new PlytixError(
+        'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
+      );
+    }
+
+    // Fetch in batches to avoid overwhelming Plytix rate limits
+    const BATCH_SIZE = 10;
+    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
+    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
+      const batch = attrIds.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map((id) => this.getAttributeById(id))
+      );
+      allResults.push(...batchResults);
+    }
 
     const byLabel = new Map<string, PlytixAttributeDetail>();
-    for (const result of results) {
+    let failures = 0;
+    for (const result of allResults) {
       if (result.status === 'fulfilled' && result.value?.label) {
         byLabel.set(result.value.label, result.value);
+      } else {
+        failures++;
       }
     }
 
-    this.attributeCache = { byLabel, expires: now + CACHE_TTL_MS };
+    // If >20% of fetches failed or returned empty, don't cache — surface the error
+    if (failures > attrIds.length * 0.2) {
+      throw new PlytixError(
+        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
+      );
+    }
+
+    this.attributeCache = { byLabel, expires: Date.now() + CACHE_TTL_MS };
     return byLabel;
   }
 
@@ -473,13 +661,40 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Assets (v2 API)
+  // Assets (v1 API for account-level asset discovery and metadata)
   // ─────────────────────────────────────────────────────────────
 
   async searchAssets(body?: PlytixSearchBody): Promise<PlytixResult<PlytixAsset>> {
-    return this.request<PlytixAsset>('/api/v2/assets/search', {
+    return this.request<PlytixAsset>('/api/v1/assets/search', {
       method: 'POST',
       body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async getAsset(assetId: string): Promise<PlytixResult<PlytixAsset>> {
+    return this.request<PlytixAsset>(`/api/v1/assets/${encodeURIComponent(assetId)}`);
+  }
+
+  async updateAsset(
+    assetId: string,
+    data: { filename?: string; categories?: string[] }
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const body: {
+      filename?: string;
+      categories?: Array<{ id: string }>;
+    } = {};
+
+    if (data.filename !== undefined) {
+      body.filename = data.filename;
+    }
+
+    if (data.categories !== undefined) {
+      body.categories = data.categories.map((id) => ({ id }));
+    }
+
+    return this.request<PlytixAsset>(`/api/v1/assets/${encodeURIComponent(assetId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
     });
   }
 
@@ -521,6 +736,39 @@ export class PlytixClient {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
+  }
+
+  /**
+   * Link an existing asset to a product.
+   * Optionally attach it to a media attribute label.
+   */
+  async linkProductAsset(
+    productId: string,
+    assetId: string,
+    attributeLabel?: string
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const body: { id: string; attribute_label?: string } = { id: assetId };
+    if (attributeLabel !== undefined) {
+      body.attribute_label = attributeLabel;
+    }
+
+    return this.request<PlytixAsset>(`/api/v2/products/${encodeURIComponent(productId)}/assets`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Unlink an asset from a product. Asset is not deleted from the account.
+   */
+  async unlinkProductAsset(
+    productId: string,
+    assetId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(assetId)}`,
+      { method: 'DELETE' }
+    );
   }
 
   /**
@@ -570,9 +818,123 @@ export class PlytixClient {
     );
   }
 
+  async searchCategories(body?: PlytixSearchBody): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>('/api/v1/categories/product/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async getRelationship(
+    relationshipId: string
+  ): Promise<PlytixResult<PlytixRelationshipDefinition>> {
+    return this.request<PlytixRelationshipDefinition>(
+      `/api/v1/relationships/${encodeURIComponent(relationshipId)}`
+    );
+  }
+
+  async searchRelationships(
+    body?: PlytixSearchBody
+  ): Promise<PlytixResult<PlytixRelationshipDefinition>> {
+    return this.request<PlytixRelationshipDefinition>('/api/v1/relationships/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  /**
+   * Add related products to a relationship for a product.
+   */
+  async linkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Remove related products from a relationship for a product.
+   */
+  async unlinkProductRelationship(
+    productId: string,
+    relationshipId: string,
+    relatedProductIds: string[]
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({
+          product_relationships: relatedProductIds,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Update relationship attributes for related products (e.g., quantity).
+   */
+  async updateProductRelationship(
+    productId: string,
+    relationshipId: string,
+    productRelationships: Array<{ product_id: string; quantity?: number }>
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(productId)}/relationships/${encodeURIComponent(relationshipId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          product_relationships: productRelationships,
+        }),
+      }
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────
-  // Variants (v1 API - write operations)
+  // Variants
   // ─────────────────────────────────────────────────────────────
+
+  async createVariant(
+    parentProductId: string,
+    data: { sku: string; label?: string; attributes?: Record<string, unknown> }
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variants`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+  }
+
+  async linkVariant(
+    parentProductId: string,
+    variantProductId: string
+  ): Promise<PlytixResult<PlytixProduct>> {
+    return this.request<PlytixProduct>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variant/${encodeURIComponent(variantProductId)}`,
+      { method: 'POST' }
+    );
+  }
+
+  async unlinkVariant(
+    parentProductId: string,
+    variantProductId: string
+  ): Promise<PlytixResult<void>> {
+    return this.request<void>(
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variant/${encodeURIComponent(variantProductId)}`,
+      { method: 'DELETE' }
+    );
+  }
 
   /**
    * Resync variant attributes to inherit values from the parent product.
@@ -588,7 +950,7 @@ export class PlytixClient {
     variantIds: string[]
   ): Promise<PlytixResult<void>> {
     return this.request<void>(
-      `/api/v1/products/${encodeURIComponent(parentProductId)}/variants/resync`,
+      `/api/v2/products/${encodeURIComponent(parentProductId)}/variants/resync`,
       {
         method: 'POST',
         body: JSON.stringify({

@@ -127,9 +127,13 @@ async function runTests() {
     failed++;
   }
 
-  // Test 3: MCP without credentials (should fail gracefully)
+  // Test 3: Public handshake methods do NOT require credentials.
+  // An MCP client must be able to initialize and discover tools before it has
+  // anything to authenticate with, so the worker intentionally allows
+  // initialize / notifications/initialized / tools/list unauthenticated
+  // (see `publicMethods` in src/worker.ts). Only tools/call needs credentials.
   if (
-    await testEndpoint('MCP without credentials (should require auth)', async () => {
+    await testEndpoint('MCP public handshake without credentials (initialize allowed)', async () => {
       const response = await fetch(`${BASE_URL}/mcp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -140,8 +144,39 @@ async function runTests() {
         }),
       });
 
-      if (response.status !== 401) {
-        throw new Error(`Expected 401, got ${response.status}`);
+      if (response.status !== 200) {
+        throw new Error(`Expected 200 for public initialize, got ${response.status}`);
+      }
+    })
+  ) {
+    passed++;
+  } else {
+    failed++;
+  }
+
+  // Test 3b: tools/call WITHOUT credentials must be rejected. This is the actual
+  // auth boundary — a regression here would expose live PIM data through the
+  // public worker URL. Deliberately sends no X-Plytix-* headers (so it must not
+  // use fetchJson, which would attach credentials when they are present in env).
+  if (
+    await testEndpoint('MCP tools/call without credentials (must be rejected)', async () => {
+      const response = await fetch(`${BASE_URL}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'products_search', arguments: {} },
+        }),
+      });
+
+      const json = await response.json();
+      if (!json.error) {
+        throw new Error('Unauthenticated tools/call returned a result instead of an auth error');
+      }
+      if (!/credential/i.test(json.error.message || '')) {
+        throw new Error(`Expected a credentials error, got: ${json.error.message}`);
       }
     })
   ) {

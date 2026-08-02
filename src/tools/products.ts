@@ -8,9 +8,60 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
+import type {
+  PlytixProduct,
+  ProductBatchExportInput,
+  ProductBatchExportToFileInput,
+} from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
 import type { IdentifierType } from '../lookup/identifier.js';
+import {
+  MANIFEST_MAX_ITEMS,
+  STDIO_INLINE_MAX_BYTES,
+  STDIO_INLINE_MAX_ITEMS,
+} from '../batch/helpers.js';
+import { readBatchManifest } from '../batch/manifest.js';
+import {
+  STDIO_EXPORT_INLINE_MAX_BYTES,
+  STDIO_EXPORT_INLINE_MAX_ROWS,
+} from '../batch/export.js';
+
+const batchUpdateItemSchema = z.object({
+  sku: z.string().min(1).optional(),
+  product_id: z.string().min(1).optional(),
+  label: z.string().optional(),
+  status: z.string().optional(),
+  attributes: z.record(z.unknown()).optional(),
+  expected_attributes: z.record(z.unknown()).optional(),
+  if_match: z.record(z.unknown()).optional(),
+});
+
+const batchExportShape = {
+  mode: z.enum(['search', 'skus', 'product_ids']).describe('Export selector mode'),
+  filters: z
+    .array(z.any())
+    .nullable()
+    .optional()
+    .describe('Search filters for mode: search'),
+  sort: z.any().optional().describe('Sort payload for mode: search'),
+  confirm_full_catalog: z
+    .boolean()
+    .optional()
+    .describe('Required for empty-filter search exports'),
+  skus: z.array(z.string().min(1)).optional().describe('Exact SKUs for mode: skus'),
+  product_ids: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('Product IDs for mode: product_ids'),
+  attributes: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('Attributes to project for search/skus mode (max 50)'),
+  max_rows: z.number().int().positive().optional().describe('Maximum rows to export'),
+  page_size: z.number().int().positive().max(100).optional().describe('Search page size'),
+  preview_rows: z.number().int().positive().max(20).optional().describe('Preview row count'),
+};
 
 export function registerProductTools(server: McpServer, client: PlytixClient) {
   // Create lookup instance for smart search
@@ -25,12 +76,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_lookup',
     {
       title: 'Smart Product Lookup',
-      description:
-        'Smart product lookup that auto-detects identifier type (ID, SKU, MPN, GTIN, label). ' +
-        'Uses staged search strategies with confidence scoring. ' +
-        'Returns the best match along with the search plan used. ' +
-        'MPN/MNO searches use PLYTIX_MPN_LABELS / PLYTIX_MNO_LABELS (defaults to attributes.mpn/model_no). ' +
-        'Includes overwritten_attributes to show which values are inherited vs explicitly set.',
+      description: 'Find the best product match for an identifier.',
       inputSchema: {
         identifier: z.string().min(1).describe('Product identifier (ID, SKU, MPN, GTIN, or label)'),
         type: z
@@ -110,10 +156,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_get',
     {
       title: 'Get Product',
-      description:
-        'Get a single product by ID. Returns full product data including ' +
-        'overwritten_attributes (attributes explicitly set, not inherited from family), ' +
-        'product_family_id, and product_type (PARENT/VARIANT/STANDALONE).',
+      description: 'Get one product by ID.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
       },
@@ -147,6 +190,97 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // products.get_full - Product + family + variants + categories + assets
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ product_id: string }>(
+    server,
+    'products_get_full',
+    {
+      title: 'Get Product (Full)',
+      description: 'Get one product with related data.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID to fetch'),
+      },
+    },
+    async ({ product_id }) => {
+      try {
+        const productResult = await client.getProduct(product_id);
+        const product = productResult.data?.[0] as PlytixProduct | undefined;
+
+        if (!product) {
+          return {
+            content: [{ type: 'text', text: `Product not found: ${product_id}` }],
+            isError: true,
+          };
+        }
+
+        const familyId = product.product_family_id;
+        const [familyResult, variantsResult, categoriesResult, assetsResult] =
+          await Promise.allSettled([
+            familyId ? client.getFamily(familyId) : Promise.resolve(null),
+            client.getProductVariants(product_id),
+            client.getProductCategories(product_id),
+            client.getProductAssets(product_id),
+          ]);
+
+        const errors: string[] = [];
+        const errMsg = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+        const family =
+          familyResult.status === 'fulfilled'
+            ? (familyResult.value?.data?.[0] ?? null)
+            : (errors.push(`family: ${errMsg(familyResult.reason)}`), null);
+
+        const variants =
+          variantsResult.status === 'fulfilled'
+            ? (variantsResult.value?.data ?? [])
+            : (errors.push(`variants: ${errMsg(variantsResult.reason)}`), []);
+
+        const categories =
+          categoriesResult.status === 'fulfilled'
+            ? (categoriesResult.value?.data ?? [])
+            : (errors.push(`categories: ${errMsg(categoriesResult.reason)}`), []);
+
+        const assets =
+          assetsResult.status === 'fulfilled'
+            ? (assetsResult.value?.data ?? [])
+            : (errors.push(`assets: ${errMsg(assetsResult.reason)}`), []);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  product,
+                  family,
+                  variants,
+                  categories,
+                  assets,
+                  ...(errors.length > 0 ? { _errors: errors } : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error fetching product: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // products.search - Advanced search with filters
   // ─────────────────────────────────────────────────────────────
 
@@ -160,10 +294,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_search',
     {
       title: 'Search Products',
-      description:
-        'Search products with filters, pagination, and sorting. ' +
-        'Use attributes.filters tool to discover available filter fields. ' +
-        'Custom attributes should be prefixed with "attributes." (e.g., "attributes.head_material").',
+      description: 'Search products with filters.',
       inputSchema: {
         attributes: z
           .array(z.string())
@@ -187,6 +318,18 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     },
     async (args) => {
       try {
+        // Normalize [field, operator, value] tuples to objects (parity with the worker).
+        if (Array.isArray(args.filters)) {
+          args.filters = (args.filters as unknown[]).map((group) =>
+            Array.isArray(group)
+              ? group.map((item) =>
+                  Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string'
+                    ? { field: item[0], operator: item[1], value: item[2] }
+                    : item
+                )
+              : group
+          ) as typeof args.filters;
+        }
         const result = await client.searchProducts(args as Parameters<typeof client.searchProducts>[0]);
 
         return {
@@ -220,6 +363,85 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // products.batch_export - Small inline product export
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<ProductBatchExportInput & Record<string, unknown>>(
+    server,
+    'products_batch_export',
+    {
+      title: 'Batch Export Products',
+      description:
+        `Export a small product snapshot inline by search, SKU list, or product ID list ` +
+        `(max ${STDIO_EXPORT_INLINE_MAX_ROWS} rows and ${STDIO_EXPORT_INLINE_MAX_BYTES} serialized bytes).`,
+      inputSchema: batchExportShape,
+    },
+    async (args) => {
+      try {
+        const result = await client.batchExportProducts(args as ProductBatchExportInput);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error running batch export: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_export_to_file - Stdio-only product export
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<ProductBatchExportToFileInput & Record<string, unknown>>(
+    server,
+    'products_batch_export_to_file',
+    {
+      title: 'Batch Export Products To File',
+      description:
+        'Write a product snapshot to JSONL/NDJSON under PLYTIX_MCP_EXPORT_DIR without returning all rows through the model context.',
+      inputSchema: {
+        ...batchExportShape,
+        output_path: z
+          .string()
+          .min(1)
+          .describe('Export path relative to PLYTIX_MCP_EXPORT_DIR, or absolute inside it'),
+        format: z.enum(['jsonl', 'ndjson']).optional().describe('Must match output_path extension'),
+        overwrite: z.boolean().optional().describe('Replace output_path if it already exists'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await client.batchExportProductsToFile(args as ProductBatchExportToFileInput);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error writing batch export: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // products.find - Multi-criteria search
   // ─────────────────────────────────────────────────────────────
 
@@ -236,9 +458,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_find',
     {
       title: 'Find Products',
-      description:
-        'Find products by multiple criteria (SKU, MPN, MNO, GTIN, label, or fuzzy search). ' +
-        'Simpler than products.search - just specify the fields you know.',
+      description: 'Find products by common identifiers.',
       inputSchema: {
         sku: z.string().optional().describe('Exact SKU match'),
         mpn: z.string().optional().describe('Manufacturer part number'),
@@ -320,9 +540,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_create',
     {
       title: 'Create Product',
-      description:
-        'Create a new product. Only SKU is required. ' +
-        'Cannot create new attributes/categories/assets - must link existing ones by ID.',
+      description: 'Create a product.',
       inputSchema: {
         sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
         label: z.string().optional().describe('Product label/name'),
@@ -403,9 +621,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_update',
     {
       title: 'Update Product',
-      description:
-        'Update a product. Partial update - only specified fields are changed. ' +
-        'Set an attribute value to null to clear it.',
+      description: 'Update a product.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to update'),
         label: z.string().optional().describe('New product label/name'),
@@ -473,6 +689,115 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   );
 
   // ─────────────────────────────────────────────────────────────
+  // products.batch_update - Batch update products by product_id/sku
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    items: unknown[];
+    dry_run?: boolean;
+    return_successes?: boolean;
+  }>(
+    server,
+    'products_batch_update',
+    {
+      title: 'Batch Update Products',
+      description: 'Update a small batch of products by product_id or sku using documented product PATCH operations. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
+      inputSchema: {
+        items: z
+          .array(batchUpdateItemSchema)
+          .describe(`Products to update (max ${STDIO_INLINE_MAX_ITEMS} items and ${STDIO_INLINE_MAX_BYTES} serialized bytes)`),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe('Validate, resolve, and verify the batch without applying PATCH updates'),
+        return_successes: z
+          .boolean()
+          .optional()
+          .describe('Include one success row per patched product for exact caller ledger updates'),
+      },
+    },
+    async ({ items, dry_run, return_successes }) => {
+      try {
+        const result = await client.batchUpdateProducts(items, {
+          dryRun: dry_run === true,
+          returnSuccesses: return_successes === true,
+          maxItems: STDIO_INLINE_MAX_ITEMS,
+          maxBytes: STDIO_INLINE_MAX_BYTES,
+        });
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error running batch update: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.batch_update_manifest - Stdio-only manifest batch update
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    manifest_path: string;
+    dry_run?: boolean;
+    return_successes?: boolean;
+  }>(
+    server,
+    'products_batch_update_manifest',
+    {
+      title: 'Batch Update Products From Manifest',
+      description: 'Read a local JSON manifest and update products without sending large payloads through the model context. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
+      inputSchema: {
+        manifest_path: z.string().min(1).describe('Path to a schema_version: 1 JSON manifest'),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe('Validate, resolve, and verify the manifest without applying PATCH updates'),
+        return_successes: z
+          .boolean()
+          .optional()
+          .describe('Include one success row per patched product for exact caller ledger updates'),
+      },
+    },
+    async ({ manifest_path, dry_run, return_successes }) => {
+      try {
+        const manifest = await readBatchManifest(manifest_path);
+        const result = await client.batchUpdateProducts(manifest.items, {
+          dryRun: dry_run === true,
+          returnSuccesses: return_successes === true,
+          maxItems: MANIFEST_MAX_ITEMS,
+          metadata: manifest.metadata,
+        });
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error reading batch manifest: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
   // products.assign_family - Assign/unassign family
   // ─────────────────────────────────────────────────────────────
 
@@ -481,9 +806,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_assign_family',
     {
       title: 'Assign Product Family',
-      description:
-        'Assign a product family to a product. Pass empty string to unassign. ' +
-        'WARNING: Changing family may cause data loss. Cannot assign to variant products.',
+      description: 'Assign or unassign a family. WARNING: reassigning a family can permanently drop attribute values not present in the target family.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID'),
         family_id: z
