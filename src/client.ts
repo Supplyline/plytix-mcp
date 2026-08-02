@@ -353,16 +353,6 @@ export class PlytixClient {
     );
   }
 
-  async createFamily(data: {
-    name: string;
-    parent_id?: string;
-  }): Promise<PlytixResult<PlytixFamily>> {
-    return this.request<PlytixFamily>('/api/v1/product_families', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
   async linkFamilyAttributes(
     familyId: string,
     attributeLabels: string[]
@@ -427,8 +417,16 @@ export class PlytixClient {
       const system: string[] = [];
       const custom: PlytixFilterDefinition[] = [];
 
-      if (filtersResult.data) {
-        for (const filter of filtersResult.data) {
+      // Plytix (observed 2026-08) wraps the filter list in a single
+      // { attributes: [...] } object inside data; older accounts returned the
+      // filter definitions directly in data. Accept both shapes.
+      const raw = (filtersResult.data ?? []) as Array<
+        PlytixFilterDefinition & { attributes?: PlytixFilterDefinition[] }
+      >;
+      const filterList = Array.isArray(raw[0]?.attributes) ? raw[0].attributes! : raw;
+
+      if (filterList) {
+        for (const filter of filterList) {
           const field = filter.key ?? filter.field;
           if (field) {
             if (field.startsWith('attributes.')) {
@@ -677,15 +675,20 @@ export class PlytixClient {
 
   async updateAsset(
     assetId: string,
-    data: { filename?: string; categories?: string[] }
+    data: { filename?: string; categories?: string[]; public?: boolean }
   ): Promise<PlytixResult<PlytixAsset>> {
     const body: {
       filename?: string;
+      public?: boolean;
       categories?: Array<{ id: string }>;
     } = {};
 
     if (data.filename !== undefined) {
       body.filename = data.filename;
+    }
+
+    if (data.public !== undefined) {
+      body.public = data.public;
     }
 
     if (data.categories !== undefined) {
@@ -971,6 +974,7 @@ export class PlytixClient {
    */
   async createFamily(data: {
     name: string;
+    parent_id?: string;
     attribute_ids?: string[];
     parent_attribute_ids?: string[];
   }): Promise<PlytixResult<PlytixFamily>> {
@@ -978,6 +982,7 @@ export class PlytixClient {
       method: 'POST',
       body: JSON.stringify({
         name: data.name,
+        ...(data.parent_id !== undefined ? { parent_id: data.parent_id } : {}),
         attribute_ids: data.attribute_ids ?? [],
         parent_attribute_ids: data.parent_attribute_ids ?? [],
       }),
@@ -1124,16 +1129,6 @@ export class PlytixClient {
   // ─────────────────────────────────────────────────────────────
 
   /**
-   * Get a single asset by ID, including its download URL and metadata.
-   */
-  async getAsset(assetId: string): Promise<PlytixAsset | null> {
-    const result = await this.request<PlytixAsset>(
-      `/api/v1/assets/${encodeURIComponent(assetId)}`
-    );
-    return result.data?.[0] ?? null;
-  }
-
-  /**
    * Create an asset by giving Plytix a public URL to download from.
    * (Local-file upload via base64 is also supported by the API but is
    * known to be flaky per the Python client; URL-based is preferred.)
@@ -1148,23 +1143,6 @@ export class PlytixClient {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-  }
-
-  /**
-   * Update an asset's filename, public flag, or file-category folders.
-   */
-  async updateAsset(
-    assetId: string,
-    data: { filename?: string; public?: boolean; category_ids?: string[] }
-  ): Promise<PlytixResult<PlytixAsset>> {
-    const payload: Record<string, unknown> = {};
-    if (data.filename !== undefined) payload.filename = data.filename;
-    if (data.public !== undefined) payload.public = data.public;
-    if (data.category_ids !== undefined) payload.categories = data.category_ids;
-    return this.request<PlytixAsset>(
-      `/api/v1/assets/${encodeURIComponent(assetId)}`,
-      { method: 'PATCH', body: JSON.stringify(payload) }
-    );
   }
 
   async deleteAsset(assetId: string): Promise<boolean> {

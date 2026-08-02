@@ -69,7 +69,7 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
     },
     async ({ asset_id }) => {
       try {
-        const asset = await client.getAsset(asset_id);
+        const asset = (await client.getAsset(asset_id)).data?.[0];
         if (!asset) {
           return {
             content: [{ type: 'text', text: `Asset not found: ${asset_id}` }],
@@ -216,10 +216,10 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
     },
     async (args) => {
       try {
-        const data: { filename?: string; public?: boolean; category_ids?: string[] } = {};
+        const data: { filename?: string; public?: boolean; categories?: string[] } = {};
         if (args.filename !== undefined) data.filename = args.filename;
         if (args.public !== undefined) data.public = args.public;
-        if (args.category_ids !== undefined) data.category_ids = args.category_ids;
+        if (args.category_ids !== undefined) data.categories = args.category_ids;
         const result = await client.updateAsset(args.asset_id, data);
         return {
           content: [
@@ -269,7 +269,7 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
     },
     async ({ asset_id, dry_run, confirm_token }) => {
       try {
-        const asset = await client.getAsset(asset_id);
+        const asset = (await client.getAsset(asset_id)).data?.[0];
         if (!asset) {
           return {
             content: [{ type: 'text', text: `Asset not found: ${asset_id}` }],
