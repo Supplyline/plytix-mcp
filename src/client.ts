@@ -385,6 +385,94 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Attributes - Write Operations (v1 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new product attribute on the org.
+   *
+   * type_class options (per Plytix docs):
+   *   TextAttribute            (Short Text)
+   *   MultilineAttribute       (Paragraph)
+   *   HtmlAttribute            (HTML)
+   *   IntAttribute             (Integer)
+   *   DecimalAttribute         (Decimal)
+   *   DropdownAttribute        (Dropdown — requires options)
+   *   MultiSelectAttribute     (Multiselect — requires options)
+   *   DateAttribute            (Date)
+   *   UrlAttribute             (URL)
+   *   BooleanAttribute         (Boolean)
+   *   MediaAttribute           (Media Single)
+   *   MediaGalleryAttribute    (Media Gallery)
+   *   CompletenessAttribute    (Completeness — requires `attributes` list of contributing attrs)
+   *
+   * `product_families`: optional list of family bindings. Each entry needs
+   *   `id` (family ID) and `attribute_level` ('no_level' | 'parent_level' | 'variant_level').
+   *
+   * Invalidates the attribute cache on success so subsequent
+   * getAttributeByLabel() lookups see the new attribute.
+   */
+  async createAttribute(data: {
+    name: string;
+    type_class: string;
+    description?: string;
+    product_families?: Array<{ id: string; attribute_level: string }>;
+    options?: string[];
+    manual_sorting?: boolean;
+    sort_ascending?: boolean;
+    attributes?: Array<{ id: string; label: string }>;
+  }): Promise<PlytixResult<PlytixAttributeDetail>> {
+    const result = await this.request<PlytixAttributeDetail>('/api/v1/attributes/product', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  /**
+   * Update a product attribute's display name. Plytix's PATCH endpoint
+   * only supports renaming — type, options, etc. can't be changed once
+   * created (you'd delete+recreate). Pass the attribute ID, not label.
+   */
+  async updateAttribute(
+    attributeId: string,
+    data: { name: string }
+  ): Promise<PlytixResult<PlytixAttributeDetail>> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attributeId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }
+    );
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  /**
+   * Delete a product attribute by ID. Returns true if the attribute was
+   * deleted, false if it didn't exist (HTTP 404 is treated as a no-op).
+   * Any products using the attribute will lose those values.
+   */
+  async deleteAttribute(attributeId: string): Promise<boolean> {
+    try {
+      await this.request<void>(
+        `/api/v1/attributes/product/${encodeURIComponent(attributeId)}`,
+        { method: 'DELETE' }
+      );
+      this.attributeCache = undefined;
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Assets (v2 API)
   // ─────────────────────────────────────────────────────────────
 
@@ -512,6 +600,309 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Families — Write Operations (v1 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new product family. attribute_ids and parent_attribute_ids
+   * are optional — pass empty arrays for an empty family.
+   */
+  async createFamily(data: {
+    name: string;
+    attribute_ids?: string[];
+    parent_attribute_ids?: string[];
+  }): Promise<PlytixResult<PlytixFamily>> {
+    return this.request<PlytixFamily>('/api/v1/product_families', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: data.name,
+        attribute_ids: data.attribute_ids ?? [],
+        parent_attribute_ids: data.parent_attribute_ids ?? [],
+      }),
+    });
+  }
+
+  /**
+   * Rename a family. Plytix only supports renaming via PATCH at the family level.
+   */
+  async updateFamily(
+    familyId: string,
+    data: { name: string }
+  ): Promise<PlytixResult<PlytixFamily>> {
+    return this.request<PlytixFamily>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}`,
+      { method: 'PATCH', body: JSON.stringify(data) }
+    );
+  }
+
+  /**
+   * Delete a family. Returns true if deleted, false if it didn't exist (404).
+   * Products in the family become family-less (per the orphan recovery flow).
+   */
+  async deleteFamily(familyId: string): Promise<boolean> {
+    try {
+      await this.request<void>(
+        `/api/v1/product_families/${encodeURIComponent(familyId)}`,
+        { method: 'DELETE' }
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * Link attributes to a family. Attributes must already exist at the org level.
+   * `attributes_level` controls inheritance: 'no_level' (no model linking), 'parent_level', or 'variant_level'.
+   * This is how to fix "orphan" attributes that exist but aren't visible in a family's UI.
+   */
+  async linkAttributesToFamily(
+    familyId: string,
+    attributeIds: string[],
+    attributesLevel: string = 'no_level'
+  ): Promise<PlytixResult<unknown>> {
+    return this.request<unknown>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/link`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          attributes: attributeIds,
+          attributes_level: attributesLevel,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Unlink attributes from a family. The attributes themselves aren't deleted —
+   * they just stop being part of this family's attribute set.
+   */
+  async unlinkAttributesFromFamily(
+    familyId: string,
+    attributeIds: string[]
+  ): Promise<PlytixResult<unknown>> {
+    return this.request<unknown>(
+      `/api/v1/product_families/${encodeURIComponent(familyId)}/attributes/unlink`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ attributes: attributeIds }),
+      }
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Attribute Groups — Full CRUD (v1 API)
+  // Used to organize attributes within a family for UI display
+  // and (eventually) per-role permissions.
+  // ─────────────────────────────────────────────────────────────
+
+  async searchAttributeGroups(body?: PlytixSearchBody): Promise<PlytixResult<PlytixAttributeGroup>> {
+    return this.request<PlytixAttributeGroup>('/api/v1/attribute-groups/product/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async getAttributeGroup(groupId: string): Promise<PlytixAttributeGroup | null> {
+    const result = await this.request<PlytixAttributeGroup>(
+      `/api/v1/attribute-groups/product/${encodeURIComponent(groupId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  async createAttributeGroup(data: {
+    name: string;
+    attribute_labels?: string[];
+    order?: number;
+  }): Promise<PlytixResult<PlytixAttributeGroup>> {
+    const payload: Record<string, unknown> = { name: data.name };
+    if (data.attribute_labels && data.attribute_labels.length) {
+      payload.attribute_labels = data.attribute_labels;
+    }
+    if (data.order !== undefined) payload.order = data.order;
+    const result = await this.request<PlytixAttributeGroup>('/api/v1/attribute-groups/product', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  async updateAttributeGroup(
+    groupId: string,
+    data: { name?: string; attribute_labels?: string[]; order?: number }
+  ): Promise<PlytixResult<PlytixAttributeGroup>> {
+    const result = await this.request<PlytixAttributeGroup>(
+      `/api/v1/attribute-groups/product/${encodeURIComponent(groupId)}`,
+      { method: 'PATCH', body: JSON.stringify(data) }
+    );
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  async deleteAttributeGroup(groupId: string): Promise<boolean> {
+    try {
+      await this.request<void>(
+        `/api/v1/attribute-groups/product/${encodeURIComponent(groupId)}`,
+        { method: 'DELETE' }
+      );
+      this.attributeCache = undefined;
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) return false;
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Assets — Full CRUD + Product Linking (v1 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Get a single asset by ID, including its download URL and metadata.
+   */
+  async getAsset(assetId: string): Promise<PlytixAsset | null> {
+    const result = await this.request<PlytixAsset>(
+      `/api/v1/assets/${encodeURIComponent(assetId)}`
+    );
+    return result.data?.[0] ?? null;
+  }
+
+  /**
+   * Create an asset by giving Plytix a public URL to download from.
+   * (Local-file upload via base64 is also supported by the API but is
+   * known to be flaky per the Python client; URL-based is preferred.)
+   */
+  async createAssetFromUrl(data: {
+    url: string;
+    filename?: string;
+  }): Promise<PlytixResult<PlytixAsset>> {
+    const payload: Record<string, unknown> = { url: data.url };
+    if (data.filename) payload.filename = data.filename;
+    return this.request<PlytixAsset>('/api/v1/assets', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Update an asset's filename, public flag, or file-category folders.
+   */
+  async updateAsset(
+    assetId: string,
+    data: { filename?: string; public?: boolean; category_ids?: string[] }
+  ): Promise<PlytixResult<PlytixAsset>> {
+    const payload: Record<string, unknown> = {};
+    if (data.filename !== undefined) payload.filename = data.filename;
+    if (data.public !== undefined) payload.public = data.public;
+    if (data.category_ids !== undefined) payload.categories = data.category_ids;
+    return this.request<PlytixAsset>(
+      `/api/v1/assets/${encodeURIComponent(assetId)}`,
+      { method: 'PATCH', body: JSON.stringify(payload) }
+    );
+  }
+
+  async deleteAsset(assetId: string): Promise<boolean> {
+    try {
+      await this.request<void>(
+        `/api/v1/assets/${encodeURIComponent(assetId)}`,
+        { method: 'DELETE' }
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * Link an existing asset to a product, attaching it to a specific media attribute
+   * (e.g., "thumbnail", "additional_images", "material_swatch_image").
+   */
+  async linkAssetToProduct(
+    productId: string,
+    assetId: string,
+    attributeLabel: string
+  ): Promise<PlytixResult<unknown>> {
+    return this.request<unknown>(
+      `/api/v1/products/${encodeURIComponent(productId)}/assets`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          id: assetId,
+          attribute_label: attributeLabel,
+        }),
+      }
+    );
+  }
+
+  /**
+   * Unlink an asset from a product. The asset itself stays in Plytix —
+   * just removed from this product's media attribute.
+   */
+  async unlinkAssetFromProduct(
+    productId: string,
+    productAssetId: string
+  ): Promise<PlytixResult<unknown>> {
+    return this.request<unknown>(
+      `/api/v1/products/${encodeURIComponent(productId)}/assets/${encodeURIComponent(productAssetId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // File Categories — Asset Folder Organization (v1 API)
+  // Distinct from product categories (which use /api/v1/categories/product).
+  // ─────────────────────────────────────────────────────────────
+
+  async searchFileCategories(body?: PlytixSearchBody): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>('/api/v1/categories/file/search', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async createFileCategory(data: {
+    name: string;
+    parent_id?: string;
+  }): Promise<PlytixResult<PlytixCategory>> {
+    const payload: Record<string, unknown> = { name: data.name };
+    if (data.parent_id) payload.parent_id = data.parent_id;
+    return this.request<PlytixCategory>('/api/v1/categories/file', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateFileCategory(
+    categoryId: string,
+    data: { name?: string; parent_id?: string }
+  ): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>(
+      `/api/v1/categories/file/${encodeURIComponent(categoryId)}`,
+      { method: 'PATCH', body: JSON.stringify(data) }
+    );
+  }
+
+  async deleteFileCategory(categoryId: string): Promise<boolean> {
+    try {
+      await this.request<void>(
+        `/api/v1/categories/file/${encodeURIComponent(categoryId)}`,
+        { method: 'DELETE' }
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) return false;
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Generic Request (for custom endpoints)
   // ─────────────────────────────────────────────────────────────
 
@@ -521,4 +912,12 @@ export class PlytixClient {
   async call<T = unknown>(path: string, init: RequestInit = {}): Promise<PlytixResult<T>> {
     return this.request<T>(path, init);
   }
+}
+
+// Minimal type for an attribute group (matches Plytix API shape)
+export interface PlytixAttributeGroup {
+  id?: string;
+  name?: string;
+  attribute_labels?: string[];
+  order?: number;
 }

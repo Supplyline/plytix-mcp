@@ -176,3 +176,27 @@ _Last updated: 2025-01-22_
 - Enhanced products.get to include overwritten_attributes
 - Added vitest test infrastructure
 - Improved PlytixClient with rate limiting and retry logic
+
+## Destructive Operations Gate (added 2026-05-20)
+
+The five `*_delete` tools (`attributes_delete`, `families_delete`, `attribute_groups_delete`, `assets_delete`, `file_categories_delete`) all use a two-step safety pattern enforced by `src/safety.ts`:
+
+1. **Dry-run step**: caller invokes the tool with `dry_run: true`. The gate returns a preview of what would be deleted PLUS a server-generated `confirm_token` (5-minute TTL, single-use, target-specific).
+2. **Execute step**: caller invokes the same tool again with `confirm_token` set to that token. Gate validates and consumes the token, then executes.
+
+**Session cap**: `MAX_DELETES_PER_SESSION = 3`. After 3 successful deletes the gate refuses further deletes until the MCP process restarts.
+
+**Why**: AI agents that auto-iterate could mass-delete catalog data. The dry_run forces a visible intermediate response in chat, the token can't be predicted client-side, and the session cap limits damage from runaway loops.
+
+**Don't bypass**: when adding new delete-style tools, use the same pattern. Import from `../safety.js`:
+
+```ts
+import { makeDryRunResult, consumeToken, sessionCapAvailable, recordDelete, MAX_DELETES_PER_SESSION } from '../safety.js';
+```
+
+Then in the tool handler:
+- Look up the target and build a `preview` object
+- If `dry_run`, return `makeDryRunResult(tool_name, target_id, preview)`
+- Else, `consumeToken(tool_name, target_id, confirm_token)` → bail on error
+- Then `sessionCapAvailable()` → bail on error
+- Execute the deletion, call `recordDelete()`, return success

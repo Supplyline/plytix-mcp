@@ -12,6 +12,7 @@ import { PlytixClient } from './client.js';
 import { registerProductTools } from './tools/products.js';
 import { registerFamilyTools } from './tools/families.js';
 import { registerAttributeTools } from './tools/attributes.js';
+import { registerAttributeGroupTools } from './tools/attribute_groups.js';
 import { registerAssetTools } from './tools/assets.js';
 import { registerCategoryTools } from './tools/categories.js';
 import { registerVariantTools } from './tools/variants.js';
@@ -29,6 +30,7 @@ async function main() {
   registerProductTools(server, client);
   registerFamilyTools(server, client);
   registerAttributeTools(server, client);
+  registerAttributeGroupTools(server, client);
   registerAssetTools(server, client);
   registerCategoryTools(server, client);
   registerVariantTools(server, client);
