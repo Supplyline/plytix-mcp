@@ -1161,7 +1161,7 @@ export class PlytixClient {
 
   /**
    * Link an existing asset to a product, attaching it to a specific media attribute
-   * (e.g., "thumbnail", "additional_images", "material_swatch_image").
+   * (e.g., "thumbnail", "additional_images", "swatch").
    */
   async linkAssetToProduct(
     productId: string,

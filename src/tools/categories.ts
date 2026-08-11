@@ -254,7 +254,7 @@ export function registerCategoryTools(server: McpServer, client: PlytixClient) {
       title: 'Create File Category (asset folder)',
       description:
         'Create a new asset folder. Optionally pass `parent_id` to create as a sub-folder. ' +
-        'Useful for organizing assets by type ("WLS Patterns", "Material Swatches", "Lifestyle Photos", "Brand").',
+        'Useful for organizing assets by type ("Product Photos", "Swatches", "Lifestyle Photos", "Brand").',
       inputSchema: {
         name: z.string().min(1).describe('Folder name'),
         parent_id: z.string().optional().describe('Parent folder ID for nesting'),

@@ -4,7 +4,7 @@
  * Read + write operations on assets. Assets in Plytix are media files
  * (images, swatches, PDFs) organized via File Categories (asset folders).
  * Assets attach to products via SPECIFIC media attributes (thumbnail,
- * additional_images, material_swatch_image) — when you link, you specify
+ * additional_images, swatch) — when you link, you specify
  * which attribute receives the asset.
  */
 
@@ -346,7 +346,7 @@ export function registerAssetTools(server: McpServer, client: PlytixClient) {
       title: 'Link Asset to Product',
       description:
         'Attach an existing asset to a specific media attribute on a product. ' +
-        'Common attribute_label values: "thumbnail", "additional_images", "material_swatch_image".',
+        'Common attribute_label values: "thumbnail", "additional_images", "swatch".',
       inputSchema: {
         product_id: z.string().describe('Product ID'),
         asset_id: z.string().describe('Asset ID'),
