@@ -132,6 +132,42 @@ describe('PlytixClient token lifecycle', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// Product filter discovery — /filters/product response shapes
+// ─────────────────────────────────────────────────────────────
+
+describe('PlytixClient getProductAttributes', () => {
+  const FILTER_DEFS = [
+    { key: 'sku', filter_type: 'TextAttribute' },
+    { key: 'status', filter_type: 'Dropdown' },
+    { key: 'attributes.head_material', filter_type: 'Dropdown' },
+  ];
+
+  it('parses the legacy shape (definitions directly in data)', async () => {
+    stubFetch(authRoute(), (url) =>
+      url.includes('/api/v1/filters/product') ? json({ data: FILTER_DEFS }) : undefined
+    );
+
+    const result = await makeClient().getProductAttributes();
+
+    expect(result.system).toEqual(['sku', 'status']);
+    expect(result.custom.map((f) => f.key)).toEqual(['attributes.head_material']);
+  });
+
+  it('parses the wrapped shape (data[0].attributes, observed 2026-08)', async () => {
+    stubFetch(authRoute(), (url) =>
+      url.includes('/api/v1/filters/product')
+        ? json({ data: [{ attributes: FILTER_DEFS }] })
+        : undefined
+    );
+
+    const result = await makeClient().getProductAttributes();
+
+    expect(result.system).toEqual(['sku', 'status']);
+    expect(result.custom.map((f) => f.key)).toEqual(['attributes.head_material']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
 // Attribute pagination + cache build
 // ─────────────────────────────────────────────────────────────
 
