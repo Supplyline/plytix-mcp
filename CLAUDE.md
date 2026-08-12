@@ -245,3 +245,35 @@ deprecated), `iss` on authorization responses per RFC 9207, and the RFC 8707
 - Enhanced products.get to include overwritten_attributes
 - Added vitest test infrastructure
 - Improved PlytixClient with rate limiting and retry logic
+
+## Delete Safety Gate
+
+`src/safety.ts` is the shared gate for destructive tools. When adding a
+delete-style tool, use it rather than inventing another pattern:
+
+```ts
+import {
+  makeDryRunResult,
+  authorizeDelete,
+  recordDelete,
+} from '../safety.js';
+```
+
+In the handler:
+
+1. Resolve the target and build a `preview` object. If it does not resolve,
+   return `isError` — never issue a token for something that is not there.
+2. If `dry_run`, return `makeDryRunResult(tool, target, preview)`. It returns
+   `{ ok: false }` when the session cap is exhausted, so no token is minted
+   that could never be redeemed.
+3. Otherwise call `authorizeDelete(tool, target, confirm_token)`. It checks the
+   cap *before* consuming the token, so a capped session does not strand a
+   valid token.
+4. Perform the delete, and call `recordDelete()` **only if something was
+   actually removed**. A 404 no-op must not spend the session budget.
+
+The cap comes from `PLYTIX_MCP_MAX_DELETES` (default 3, `0` disables deletes).
+
+Note the gate's limits: the token is returned to the calling agent, so this is
+a forced pause with a preview, not human confirmation. See the README section
+for the `elicitInput` upgrade path.

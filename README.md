@@ -268,6 +268,27 @@ Products return an `overwritten_attributes` array listing which attributes are e
 | `PLYTIX_MPN_LABELS` | ❌ | `["attributes.mpn"]` | JSON array of MPN attribute labels |
 | `PLYTIX_MNO_LABELS` | ❌ | `["attributes.model_no"]` | JSON array of MNO attribute labels |
 | `PLYTIX_MCP_EXPORT_DIR` | ❌ | — | Required only for `products_batch_export_to_file`; limits file exports to this directory |
+| `PLYTIX_MCP_MAX_DELETES` | ❌ | `3` | Deletes one server process will perform before refusing further ones. `0` disables deletes entirely. See [Delete safety gate](#delete-safety-gate) |
+
+### Delete safety gate
+
+`src/safety.ts` provides a two-call gate for destructive tools. A caller first
+invokes the tool with `dry_run: true` and gets back a preview of what would be
+removed plus a `confirm_token`; executing requires calling again with that
+token. Tokens are single-use, scoped to one tool and one target, and expire
+after 5 minutes. A per-process cap (`PLYTIX_MCP_MAX_DELETES`, default 3) bounds
+how much any one session can remove.
+
+**What this does and does not protect against.** The token goes back to the
+calling agent, not to a human — an autonomous agent can read it from the
+dry-run response and immediately call again. So the gate is a forced pause with
+a visible preview and a hard ceiling, not a human confirmation step. It stops a
+runaway loop from clearing a catalog; it does not stop an agent that has decided
+to delete something.
+
+Genuine human confirmation needs the MCP `elicitInput` capability, where the
+server asks the client to prompt the user. A future revision can elicit when the
+client advertises that capability and fall back to this token flow otherwise.
 
 ## Development
 
