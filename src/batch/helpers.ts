@@ -6,6 +6,8 @@ import type {
   BatchUpdateResult,
   BatchUpdateSuccess,
 } from '../types.js';
+import { PlytixError, type RateLimitHit } from '../types.js';
+import { MAX_RATE_RETRIES, backoffDelayMs } from '../rate-limit.js';
 
 export const STDIO_INLINE_MAX_ITEMS = 250;
 export const WORKER_INLINE_MAX_ITEMS = 50;
@@ -14,7 +16,9 @@ export const STDIO_INLINE_MAX_BYTES = 512 * 1024;
 export const WORKER_INLINE_MAX_BYTES = 256 * 1024;
 export const MANIFEST_MAX_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_BATCH_CONCURRENCY = 3;
-export const DEFAULT_BATCH_REQUEST_DELAY_MS = 250;
+// A guarded manifest row is two requests (guard GET + PATCH), so with the default
+// concurrency this paces at ~4 req/s — well under the 50 req / 10 s account window.
+export const DEFAULT_BATCH_REQUEST_DELAY_MS = 500;
 
 export interface BatchValidationOptions {
   maxItems: number;
@@ -421,4 +425,54 @@ export async function runWithConcurrency<T, R>(
   );
   await Promise.all(workers);
   return results;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Transient-error retry (second line behind the client's own 429/5xx handling)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 429 is always transient (Plytix did not process the request). 5xx and transport errors are
+ * transient only for reads: on a mutation they may mean "applied, response lost", and
+ * replaying would re-apply a stale delta.
+ */
+export function isTransientError(error: unknown, mutation = false): boolean {
+  const status =
+    error && typeof error === 'object' && 'status' in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+  if (typeof status === 'number') {
+    return status === 429 || (!mutation && status >= 500);
+  }
+  return !mutation;
+}
+
+export interface TransientRetryOptions {
+  retries?: number;
+  /** PATCH/POST-create/DELETE: retry 429 only. */
+  mutation?: boolean;
+}
+
+/**
+ * Retries `fn` on transient failures using the shared backoff schedule. A server hint past
+ * the cap (see `backoffDelayMs`) fails immediately rather than sleeping — the client already
+ * spent its own budget, so by the time a 429 reaches here the window is well and truly blown.
+ */
+export async function runTransientRetry<T>(
+  fn: () => Promise<T>,
+  options: TransientRetryOptions = {}
+): Promise<T> {
+  const retries = options.retries ?? MAX_RATE_RETRIES;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= retries || !isTransientError(error, options.mutation)) throw error;
+      const hit: RateLimitHit | undefined = error instanceof PlytixError ? error.rateLimit : undefined;
+      const delay = backoffDelayMs(attempt, hit);
+      if (delay === null) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error('Transient retry loop exited unexpectedly');
 }

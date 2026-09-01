@@ -11,7 +11,7 @@ A **lightweight, stateless Model Context Protocol (MCP) server** that provides A
 - **Family & inheritance tracking** with overwritten_attributes support
 - **Schema discovery** for attributes and search filters
 - **Automatic authentication** with token refresh
-- **Rate limit handling** with exponential backoff
+- **Rate limit handling** — proactive pacing to the account's advertised window plus jittered 429/5xx backoff
 - **Zero persistence** — stateless, no database required
 - **Remote server support** — Deploy to Cloudflare Workers for mobile/web access
 

@@ -234,7 +234,7 @@ Completed run:
     index: number,
     key: string,
     product_id?: string,
-    stage: "resolve" | "verify" | "conflict" | "patch",
+    stage: "resolve" | "verify" | "read" | "conflict" | "patch",
     errors: Array<{ field?: string, msg: string }>
   }>,
   successes?: Array<{
@@ -283,8 +283,11 @@ Result rules:
 - `429` and token refresh behavior stay in the existing request path. Long manifest runs
   must tolerate token expiry through 401 refresh/retry, and request pacing must limit
   concurrency rather than firing all PATCHes at once.
-- Retry transient 5xx/timeouts a small number of times; after exhaustion, record a row
-  failure.
+- Retry transient 429/5xx/timeouts a small number of times on the shared backoff schedule;
+  after exhaustion, record a row failure. A guard read that fails at the transport level is
+  `stage: "read"` (in dry runs too) — `stage: "conflict"` is reserved for genuine drift, so a
+  429 never masquerades as a conflict. Mutations (the PATCH) retry on 429 only; a 5xx on a PATCH
+  may have applied and is not replayed.
 - `google_detail` feeds customer-facing Google Merchant output; surface failures
   prominently.
 - Absent custom attributes on read-back are not proof of unchanged values, because Plytix

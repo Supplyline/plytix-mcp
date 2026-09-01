@@ -10,7 +10,7 @@ import {
   type ProductExportSink,
 } from '../batch/export.js';
 import { exportProductsToFile } from '../batch/export-file.js';
-import type { PlytixProduct, PlytixResult, PlytixSearchBody } from '../types.js';
+import { PlytixError, type PlytixProduct, type PlytixResult, type PlytixSearchBody } from '../types.js';
 
 const searchFilter = [[{ field: 'status', operator: 'eq', value: 'ACTIVE' }]];
 
@@ -355,5 +355,79 @@ describe('inline byte cap', () => {
     // The rejection must not echo row payloads.
     expect(result.products ?? []).toHaveLength(0);
     expect(JSON.stringify(result.failures)).not.toContain('xxxx');
+  });
+});
+
+
+// Fake timers, but leave setImmediate real so crypto.subtle (credential digest, row hashes)
+// can complete between steps — otherwise real I/O and fake sleeps deadlock each other.
+const FAKE = { toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const };
+async function advance(ms: number, step = 250): Promise<void> {
+  let elapsed = 0;
+  do {
+    const chunk = Math.min(step, ms - elapsed);
+    await vi.advanceTimersByTimeAsync(chunk);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    elapsed += chunk;
+  } while (elapsed < ms);
+}
+
+describe('batch export transient retries', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries a rate-limited product fetch on the shared schedule and still exports the row', async () => {
+    vi.useFakeTimers(FAKE);
+    let gets = 0;
+    const ops = makeOps({
+      get: async (productId) => {
+        gets++;
+        if (gets < 4) {
+          throw new PlytixError('429 rate limited after 4 attempts: {}', 429, '{}', {
+            limit: 50,
+            windowSeconds: 10,
+          });
+        }
+        return { data: [{ id: productId, sku: 'OK' }] };
+      },
+    });
+
+    const pending = executeBatchExport(
+      ops,
+      { mode: 'product_ids', product_ids: ['product-1'] },
+      { mode: 'inline', maxRows: 10, maxResponseBytes: 1024 * 1024 }
+    );
+    await advance(30_000);
+    const result = await pending;
+
+    expect(gets).toBe(4);
+    expect(result.status).toBe('finished');
+    expect(result.summary).toMatchObject({ exported: 1, failed: 0 });
+  });
+
+  it('fails the row after the retry budget without masking the 429', async () => {
+    vi.useFakeTimers(FAKE);
+    const ops = makeOps({
+      get: async () => {
+        throw new PlytixError('429 rate limited after 4 attempts: {}', 429, '{}', {
+          limit: 50,
+          windowSeconds: 10,
+        });
+      },
+    });
+
+    const pending = executeBatchExport(
+      ops,
+      { mode: 'product_ids', product_ids: ['product-1'] },
+      { mode: 'inline', maxRows: 10, maxResponseBytes: 1024 * 1024 }
+    );
+    await advance(30_000);
+    const result = await pending;
+
+    expect(ops.getProduct).toHaveBeenCalledTimes(4);
+    expect(result.summary).toMatchObject({ exported: 0, failed: 1 });
+    expect(result.failures[0]?.errors[0]?.msg).toMatch(/^429 rate limited/);
   });
 });

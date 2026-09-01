@@ -24,7 +24,8 @@ import type {
   PlytixFilterDefinition,
   PlytixAttributeDetail,
   PlytixRelationshipDefinition,
-  RateLimitInfo,
+  RateLimitConfig,
+  RateLimitWindow,
   BatchUpdateMetadata,
   BatchUpdateResult,
   ProductBatchExportInput,
@@ -32,6 +33,16 @@ import type {
   ProductBatchExportToFileInput,
 } from './types.js';
 import { PlytixError } from './types.js';
+import {
+  DEFAULT_RATE_LIMIT,
+  TokenBucket,
+  decodeJwtRateLimits,
+  fetchWithRetry,
+  isValidRateLimitConfig,
+  parseRateLimitSpec,
+  rateLimitConfigsFromWindows,
+  type RetryLogger,
+} from './rate-limit.js';
 import {
   STDIO_INLINE_MAX_ITEMS,
   type BatchValidationOptions,
@@ -55,9 +66,17 @@ const DEFAULT_CONFIG = {
   timeoutMs: 15000,
 };
 
+// stdout is the MCP transport — every diagnostic line must go to stderr.
+const logRetry: RetryLogger = (event, context) =>
+  console.error(JSON.stringify({ event, ...context }));
+
 export class PlytixClient {
   private token?: PlytixAuthToken;
-  private config: Required<PlytixClientConfig>;
+  private config: Required<Omit<PlytixClientConfig, 'rateLimit'>>;
+  private readonly bucket: TokenBucket;
+  /** True when pacing came from config/env; JWT-advertised limits then don't override it. */
+  private readonly explicitRateLimit: boolean;
+  private rateLimits?: RateLimitWindow[];
   private attributeCache?: { byLabel: Map<string, PlytixAttributeDetail>; expires: number };
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
 
@@ -73,6 +92,29 @@ export class PlytixClient {
     if (!this.config.apiKey || !this.config.apiPassword) {
       throw new Error('Missing PLYTIX_API_KEY or PLYTIX_API_PASSWORD');
     }
+
+    let rateLimit: RateLimitConfig | undefined =
+      config?.rateLimit ?? parseRateLimitSpec(process.env.PLYTIX_RATE_LIMIT);
+    if (rateLimit && !isValidRateLimitConfig(rateLimit)) {
+      // An unusable override must not silently pin the default *and* block the JWT.
+      logRetry('plytix.rate_limit_config_ignored', { rateLimit });
+      rateLimit = undefined;
+    }
+    this.explicitRateLimit = rateLimit !== undefined;
+    this.bucket = new TokenBucket(rateLimit ?? DEFAULT_RATE_LIMIT);
+  }
+
+  /** Account windows advertised in the auth JWT (known after the first request). */
+  getRateLimits(): RateLimitWindow[] | undefined {
+    return this.rateLimits;
+  }
+
+  private applyAdvertisedRateLimits(jwt: string): void {
+    const windows = decodeJwtRateLimits(jwt);
+    if (!windows) return;
+    this.rateLimits = windows;
+    if (this.explicitRateLimit) return;
+    this.bucket.reconfigure(rateLimitConfigsFromWindows(windows));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -87,88 +129,57 @@ export class PlytixClient {
       return this.token.value;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
+    let response: Response;
     try {
-      const response = await fetch(this.config.authUrl, {
+      // Auth lives on a different host with its own limiter: retried on 429/5xx (the mint is
+      // idempotent) but not counted against our bucket.
+      response = await fetchWithRetry({
+        url: this.config.authUrl,
+        init: {
+          method: 'POST',
+          body: JSON.stringify({
+            api_key: this.config.apiKey,
+            api_password: this.config.apiPassword,
+          }),
+        },
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          api_key: this.config.apiKey,
-          api_password: this.config.apiPassword,
-        }),
-        signal: controller.signal,
+        path: '/auth/api/get-token',
+        bucket: this.bucket,
+        timeoutMs: this.config.timeoutMs,
+        log: logRetry,
+        countsAgainstBucket: false,
+        retryServerErrors: true,
       });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Authentication failed: ${response.status} - ${body}`,
-          response.status,
-          body
-        );
-      }
-
-      const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
-      const tokenData = result.data?.[0];
-
-      if (!tokenData?.access_token) {
-        throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
-      }
-
-      // Default to 15 minutes if expires_in not provided
-      const expiresIn = (tokenData.expires_in ?? 900) * 1000;
-      this.token = {
-        value: tokenData.access_token,
-        exp: now + expiresIn,
-      };
-
-      return this.token.value;
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Auth request failed: ${error}`, undefined, error);
     }
-  }
 
-  // ─────────────────────────────────────────────────────────────
-  // Rate Limiting
-  // ─────────────────────────────────────────────────────────────
-
-  private parseRateLimitHeaders(headers: Headers): RateLimitInfo | undefined {
-    const limit = headers.get('x-ratelimit-limit');
-    const remaining = headers.get('x-ratelimit-remaining');
-    const reset = headers.get('x-ratelimit-reset');
-
-    if (limit && remaining && reset) {
-      return {
-        limit: parseInt(limit, 10),
-        remaining: parseInt(remaining, 10),
-        reset: parseInt(reset, 10),
-      };
-    }
-    return undefined;
-  }
-
-  private async backoffOnRateLimit(rateLimitInfo?: RateLimitInfo): Promise<void> {
-    // Plytix 429 responses report the limit in the JSON body, not in
-    // x-ratelimit-* headers, so rateLimitInfo is usually absent here. The
-    // documented window is 10s / 50 requests — wait with jitter so a burst
-    // of concurrent retries lands spread across the next window.
-    if (!rateLimitInfo) {
-      const delay = 4000 + Math.random() * 2000;
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return;
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(
+        `Authentication failed: ${response.status} - ${body}`,
+        response.status,
+        body
+      );
     }
 
-    const now = Date.now();
-    const resetTime = rateLimitInfo.reset * 1000; // Convert to milliseconds
-    const delay = Math.max(1000, resetTime - now + 100); // Add small buffer
+    const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
+    const tokenData = result.data?.[0];
 
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    if (!tokenData?.access_token) {
+      throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
+    }
+
+    // Default to 15 minutes if expires_in not provided
+    const expiresIn = (tokenData.expires_in ?? 900) * 1000;
+    this.token = {
+      value: tokenData.access_token,
+      exp: now + expiresIn,
+    };
+    this.applyAdvertisedRateLimits(tokenData.access_token);
+
+    return this.token.value;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -177,65 +188,43 @@ export class PlytixClient {
 
   private async request<T = unknown>(
     endpoint: string,
-    options: RequestInit = {},
-    retries = 3
+    options: RequestInit = {}
   ): Promise<PlytixResult<T>> {
-    const token = await this.getToken();
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
     // Ensure no trailing slash (causes redirect that drops Authorization header)
     const url = `${this.config.baseUrl}${endpoint}`.replace(/\/+$/, '');
+    const method = (options.method ?? 'GET').toUpperCase();
 
+    let response: Response;
     try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...options.headers,
+      response = await fetchWithRetry({
+        url,
+        init: options,
+        method,
+        path: endpoint,
+        bucket: this.bucket,
+        timeoutMs: this.config.timeoutMs,
+        log: logRetry,
+        getToken: () => this.getToken(),
+        onUnauthorized: () => {
+          this.token = undefined;
         },
-        signal: controller.signal,
       });
-
-      clearTimeout(timeout);
-
-      const rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-
-      // Rate limited - backoff and retry
-      if (response.status === 429 && retries > 0) {
-        await this.backoffOnRateLimit(rateLimitInfo);
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Token expired - clear and retry
-      if (response.status === 401 && retries > 0) {
-        this.token = undefined;
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Handle 204 No Content
-      if (response.status === 204) {
-        return { data: [] } as PlytixResult<T>;
-      }
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Request failed: ${response.status} - ${body}`,
-          response.status,
-          body,
-          rateLimitInfo
-        );
-      }
-
-      return (await response.json()) as PlytixResult<T>;
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Request failed: ${error}`, undefined, error);
     }
+
+    // Handle 204 No Content
+    if (response.status === 204) {
+      return { data: [] } as PlytixResult<T>;
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(`Request failed: ${response.status} - ${body}`, response.status, body);
+    }
+
+    return (await response.json()) as PlytixResult<T>;
   }
 
   // ─────────────────────────────────────────────────────────────

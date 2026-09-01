@@ -17,6 +17,7 @@ import {
   measureSerializedBytes,
   parsePlytixErrors,
   runWithConcurrency,
+  runTransientRetry,
 } from './helpers.js';
 
 export const STDIO_EXPORT_INLINE_MAX_ROWS = 250;
@@ -481,33 +482,16 @@ async function acceptDeterministicProduct(
 
 async function getProductWithRetry(
   ops: ProductExportOperations,
-  productId: string,
-  retries = 2
+  productId: string
 ): Promise<PlytixResult<PlytixProduct>> {
-  return runTransientRetry(() => ops.getProduct(productId), retries);
+  return runTransientRetry(() => ops.getProduct(productId));
 }
 
 async function searchProductsWithRetry(
   ops: ProductExportOperations,
-  body: PlytixSearchBody,
-  retries = 2
+  body: PlytixSearchBody
 ): Promise<PlytixResult<PlytixProduct>> {
-  return runTransientRetry(() => ops.searchProducts(body), retries);
-}
-
-async function runTransientRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (attempt < retries && isTransientError(error)) {
-        await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error('Transient retry loop exited unexpectedly');
+  return runTransientRetry(() => ops.searchProducts(body));
 }
 
 async function validateExportInput(
@@ -1036,17 +1020,6 @@ export async function sha256Hex(value: string | Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
-}
-
-function isTransientError(error: unknown): boolean {
-  const status =
-    error && typeof error === 'object' && 'status' in error
-      ? (error as { status?: unknown }).status
-      : undefined;
-  if (typeof status === 'number') {
-    return status === 429 || status >= 500;
-  }
-  return true;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
