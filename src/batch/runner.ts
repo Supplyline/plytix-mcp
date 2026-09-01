@@ -18,6 +18,7 @@ import {
   rejectedResult,
   runWithConcurrency,
   validateBatchItems,
+  runTransientRetry,
 } from './helpers.js';
 
 export interface ResolvedProductRef {
@@ -170,7 +171,16 @@ export async function executeBatchUpdate(
               concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
               requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
             },
-            (row) => checkRowGuard(ops, row)
+            (row) =>
+              runTransientRetry(() => checkRowGuard(ops, row)).catch(
+                (error): BatchUpdateFailure => ({
+                  index: row.index,
+                  key: row.key,
+                  product_id: row.productId,
+                  stage: 'read',
+                  errors: parsePlytixErrors(error),
+                })
+              )
           )
         : [];
     const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
@@ -208,7 +218,10 @@ export async function executeBatchUpdate(
     )
     .map((result) => result.success);
   const allFailures = [...failures, ...patchFailures];
-  const conflictFailures = patchFailures.filter((failure) => failure.stage === 'conflict');
+  // Rows whose guard read failed (transport) or drifted (conflict) never reached PATCH.
+  const conflictFailures = patchFailures.filter(
+    (failure) => failure.stage === 'conflict' || failure.stage === 'read'
+  );
 
   return finishedResult({
     total,
@@ -228,19 +241,9 @@ async function checkRowGuard(
     return undefined;
   }
 
-  let product: PlytixProduct | undefined;
-  try {
-    const result = await ops.getProduct(row.productId);
-    product = result.data?.[0];
-  } catch (error) {
-    return {
-      index: row.index,
-      key: row.key,
-      product_id: row.productId,
-      stage: 'conflict',
-      errors: parsePlytixErrors(error),
-    };
-  }
+  // Transport failures propagate: the caller reports them as `read`, never `conflict`.
+  const result = await ops.getProduct(row.productId);
+  const product: PlytixProduct | undefined = result.data?.[0];
 
   if (!product?.id) {
     return {
@@ -341,77 +344,47 @@ type PatchRowResult =
 async function patchRowWithRetry(
   ops: BatchUpdateOperations,
   row: ReadyRow,
-  retries = 2
+  retries?: number
 ): Promise<PatchRowResult> {
-  const guardFailure = await checkRowGuard(ops, row);
+  const failure = (stage: 'read' | 'patch', errors: BatchUpdateFailure['errors']): PatchRowResult => ({
+    status: 'failure',
+    failure: { index: row.index, key: row.key, product_id: row.productId, stage, errors },
+  });
+
+  let guardFailure: BatchUpdateFailure | undefined;
+  try {
+    guardFailure = await runTransientRetry(() => checkRowGuard(ops, row), { retries });
+  } catch (error) {
+    return failure('read', parsePlytixErrors(error));
+  }
   if (guardFailure) {
     return { status: 'failure', failure: guardFailure };
   }
 
   const body = buildPatchBody(row.item);
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const result = await ops.updateProduct(row.productId, body);
-      const updated = result.data?.[0];
-      if (!updated?.id) {
-        return {
-          status: 'failure',
-          failure: {
-            index: row.index,
-            key: row.key,
-            product_id: row.productId,
-            stage: 'patch',
-            errors: [{ msg: `Product update returned no confirmed product for ${row.productId}` }],
-          },
-        };
-      }
-      return {
-        status: 'success',
-        success: {
-          index: row.index,
-          key: row.key,
-          product_id: updated.id,
-          ...(typeof updated.modified === 'string' ? { modified: updated.modified } : {}),
-        },
-      };
-    } catch (error) {
-      if (attempt < retries && isTransientError(error)) {
-        await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
-        continue;
-      }
-      return {
-        status: 'failure',
-        failure: {
-          index: row.index,
-          key: row.key,
-          product_id: row.productId,
-          stage: 'patch',
-          errors: parsePlytixErrors(error),
-        },
-      };
-    }
+  let result: PlytixResult<PlytixProduct>;
+  try {
+    result = await runTransientRetry(() => ops.updateProduct(row.productId, body), {
+      retries,
+      mutation: true,
+    });
+  } catch (error) {
+    return failure('patch', parsePlytixErrors(error));
   }
 
+  const updated = result.data?.[0];
+  if (!updated?.id) {
+    return failure('patch', [
+      { msg: `Product update returned no confirmed product for ${row.productId}` },
+    ]);
+  }
   return {
-    status: 'failure',
-    failure: {
+    status: 'success',
+    success: {
       index: row.index,
       key: row.key,
-      product_id: row.productId,
-      stage: 'patch',
-      errors: [{ msg: 'Product update retry loop exited unexpectedly' }],
+      product_id: updated.id,
+      ...(typeof updated.modified === 'string' ? { modified: updated.modified } : {}),
     },
   };
-}
-
-function isTransientError(error: unknown): boolean {
-  const status =
-    error && typeof error === 'object' && 'status' in error
-      ? (error as { status?: unknown }).status
-      : undefined;
-  if (typeof status === 'number') {
-    return status === 429 || status >= 500;
-  }
-  return true;
 }

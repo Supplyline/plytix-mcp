@@ -1,6 +1,7 @@
 # Plytix API Reference for Agents
 
-Compressed reference derived from the supplied March 11, 2026 scrape.
+Compressed reference derived from the supplied March 11, 2026 scrape; rate limits (§16a)
+verified live 2026-09-01.
 
 ## 1. Base URLs
 
@@ -449,6 +450,22 @@ Notes:
 - Category delete is recursive.
 - Linking/unlinking variants can destroy inherited data shape.
 - v2 relationship mutations silently ignore many bad ids instead of erroring.
+
+## 16a. Rate limits (verified live 2026-09-01)
+
+- Two account-level windows, both enforced: **50 requests / 10 s** and **5,000 requests / hour**
+  (Supplyline account; other plans may differ). They are advertised only in the auth JWT:
+  `user_claims.account.rate_limit: [{limit, window_size}, …]` (`window_size` in seconds).
+- Plytix sends **no `x-ratelimit-*` response headers** on v1 or v2. A 429 carries the limit in
+  its JSON body: `{"message":"API rate limit exceeded","limit":50,"window_size":10}`, sometimes
+  with `ttl` (ms until the next slot).
+- A 429 means the request was **not processed** — always safe to retry. 5xx is safe to retry
+  only for reads (`GET`, `POST …/search`); a 5xx on a PATCH may have applied.
+- This server paces itself at **80 % of every advertised window** (default 40 / 10 s before
+  the JWT is seen; `PLYTIX_RATE_LIMIT="40/10"` or `rateLimit` config overrides), retries
+  429/5xx up to 3× (1–2 s, 2–3 s, 4–5 s, jittered), and fails fast when the server asks for a
+  wait longer than 15 s. Retries are logged as JSON lines (`plytix.retry`,
+  `plytix.retry_aborted`) on stderr (stdio) / `console.warn` (Worker).
 
 ## 17. Minimal working sequence
 

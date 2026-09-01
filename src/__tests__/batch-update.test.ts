@@ -659,3 +659,135 @@ describe('worker batch-update caps', () => {
     expect(JSON.stringify(payload.failures)).toContain('50');
   });
 });
+
+describe('batch update transport failures', () => {
+  const rateLimited = (hint?: number) =>
+    new PlytixError(
+      '429 rate limited after 4 attempts: {"message":"API rate limit exceeded","limit":50,"window_size":10}',
+      429,
+      '{"message":"API rate limit exceeded","limit":50,"window_size":10}',
+      { limit: 50, windowSeconds: 10, ...(hint !== undefined ? { retryAfterMs: hint } : {}) }
+    );
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports a guard read that keeps 429ing as stage "read", never "conflict"', async () => {
+    vi.useFakeTimers();
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      get: async () => {
+        throw rateLimited();
+      },
+    });
+
+    const pending = executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { google_detail: 'x' }, expected_attributes: { google_detail: null } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    // A read failure skipped its PATCH, so it counts as skipped like a conflict does.
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 1 });
+    expect(result.failures[0]).toMatchObject({ key: 'GUARDED', stage: 'read' });
+    expect(result.failures[0]?.errors[0]?.msg).toMatch(/^429 rate limited after 4 attempts/);
+    expect(ops.getProduct).toHaveBeenCalledTimes(4); // client budget + the runner's 3 retries
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('fails a row immediately when the server hint exceeds the backoff cap', async () => {
+    const ops = makeOps({
+      resolved: { GUARDED: [{ id: 'product-1', sku: 'GUARDED' }] },
+      get: async () => {
+        throw rateLimited(20_000);
+      },
+    });
+
+    const result = await executeBatchUpdate(
+      ops,
+      [{ sku: 'GUARDED', attributes: { google_detail: 'x' }, if_match: { status: 'ACTIVE' } }],
+      { maxItems: 250, requestDelayMs: 0 }
+    );
+
+    expect(result.failures[0]).toMatchObject({ stage: 'read' });
+    expect(ops.getProduct).toHaveBeenCalledTimes(1);
+  });
+
+  it('dry-run guard reads that fail at the transport level are row failures, not a rejected batch', async () => {
+    vi.useFakeTimers();
+    const ops = makeOps({
+      resolved: { A: [{ id: 'product-a', sku: 'A' }], B: [{ id: 'product-b', sku: 'B' }] },
+      get: async (productId) => {
+        if (productId === 'product-a') throw rateLimited();
+        return { data: [{ id: productId, status: 'ACTIVE' }] };
+      },
+    });
+
+    const pending = executeBatchUpdate(
+      ops,
+      [
+        { sku: 'A', attributes: { google_detail: 'x' }, if_match: { status: 'ACTIVE' } },
+        { sku: 'B', attributes: { google_detail: 'x' }, if_match: { status: 'ACTIVE' } },
+      ],
+      { maxItems: 250, requestDelayMs: 0, dryRun: true }
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    expect(result.status).toBe('finished');
+    expect(result.summary).toEqual({ total: 2, succeeded: 0, failed: 1, skipped: 1 });
+    expect(result.failures).toEqual([
+      expect.objectContaining({ key: 'A', stage: 'read' }),
+    ]);
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('does not replay a PATCH after a 5xx — the write may have landed', async () => {
+    const ops = makeOps({
+      resolved: { ROW: [{ id: 'product-1', sku: 'ROW' }] },
+      update: async () => {
+        throw new PlytixError('Request failed: 502 - bad gateway', 502, 'bad gateway');
+      },
+    });
+
+    const result = await executeBatchUpdate(ops, [{ sku: 'ROW', attributes: { google_detail: 'x' } }], {
+      maxItems: 250,
+      requestDelayMs: 0,
+    });
+
+    expect(ops.updateProduct).toHaveBeenCalledTimes(1);
+    expect(result.failures[0]).toMatchObject({ stage: 'patch' });
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 0 });
+  });
+
+  it('spaces PATCH retries out on the shared backoff schedule', async () => {
+    vi.useFakeTimers();
+    let patches = 0;
+    const ops = makeOps({
+      resolved: { ROW: [{ id: 'product-1', sku: 'ROW' }] },
+      update: async (productId) => {
+        patches++;
+        if (patches < 4) throw rateLimited();
+        return productResult(productId);
+      },
+    });
+
+    const pending = executeBatchUpdate(ops, [{ sku: 'ROW', attributes: { google_detail: 'x' } }], {
+      maxItems: 250,
+      requestDelayMs: 0,
+    });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(patches).toBe(1); // first retry waits ≥ 1 s
+    await vi.advanceTimersByTimeAsync(2100); // t ≈ 3 s: attempt 2 has fired (delay ≤ 2 s)
+    expect(patches).toBe(2);
+    await vi.advanceTimersByTimeAsync(3000); // t ≈ 6 s: attempt 3 (delay ≤ 3 s)
+    expect(patches).toBe(3);
+    await vi.advanceTimersByTimeAsync(5000); // t ≈ 11 s: attempt 4 (delay ≤ 5 s)
+    const result = await pending;
+    expect(patches).toBe(4);
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+  });
+});

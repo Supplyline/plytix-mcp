@@ -60,10 +60,23 @@ export interface PlytixAuthResponse {
 // Rate Limiting
 // ─────────────────────────────────────────────────────────────
 
-export interface RateLimitInfo {
+/** One account-level window as advertised in the auth JWT (`user_claims.account.rate_limit`). */
+export interface RateLimitWindow {
   limit: number;
-  remaining: number;
-  reset: number; // Unix timestamp
+  windowSeconds: number;
+}
+
+/** What a 429 told us: body `limit` / `window_size`, and a server-suggested wait if any. */
+export interface RateLimitHit {
+  limit?: number;
+  windowSeconds?: number;
+  retryAfterMs?: number;
+}
+
+/** Token-bucket configuration: at most `limit` requests per sliding `windowMs`. */
+export interface RateLimitConfig {
+  limit: number;
+  windowMs: number;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -125,6 +138,7 @@ export type BatchUpdateFailureStage =
   | 'resolve'
   | 'verify'
   | 'duplicate'
+  | 'read'
   | 'conflict'
   | 'patch';
 
@@ -409,6 +423,8 @@ export interface PlytixClientConfig {
   baseUrl?: string;
   authUrl?: string;
   timeoutMs?: number;
+  /** Explicit pacing override; when set, the JWT-advertised limits are not applied. */
+  rateLimit?: RateLimitConfig;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -420,7 +436,7 @@ export class PlytixError extends Error {
     message: string,
     public status?: number,
     public response?: unknown,
-    public rateLimitInfo?: RateLimitInfo
+    public rateLimit?: RateLimitHit
   ) {
     super(message);
     this.name = 'PlytixError';

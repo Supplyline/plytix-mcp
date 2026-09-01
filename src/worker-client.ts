@@ -23,13 +23,23 @@ import type {
   PlytixAttributeDetail,
   PlytixFilterDefinition,
   PlytixRelationshipDefinition,
-  RateLimitInfo,
+  RateLimitConfig,
+  RateLimitWindow,
   BatchUpdateMetadata,
   BatchUpdateResult,
   ProductBatchExportInput,
   ProductBatchExportResult,
 } from './types.js';
 import { PlytixError } from './types.js';
+import {
+  DEFAULT_RATE_LIMIT,
+  TokenBucket,
+  decodeJwtRateLimits,
+  fetchWithRetry,
+  isValidRateLimitConfig,
+  rateLimitConfigsFromWindows,
+  type RetryLogger,
+} from './rate-limit.js';
 import {
   WORKER_INLINE_MAX_ITEMS,
   type BatchValidationOptions,
@@ -56,6 +66,17 @@ const DEFAULT_CONFIG = {
 // Keyed by a non-reversible digest of BOTH credentials so a cached token is only ever
 // reused for the exact api_key + api_password pair that minted it.
 const tokenCache = new Map<string, PlytixAuthToken>();
+
+// One pacer per credential pair per isolate. The Worker builds a client per HTTP request,
+// so a per-instance bucket would let N concurrent requests for the same account each burst
+// the full window and ignore each other's 429 penalties. Tokens are already shared this way.
+interface BucketEntry {
+  bucket: TokenBucket;
+  /** Requests currently pacing against this bucket; never evicted while > 0. */
+  inFlight: number;
+}
+const bucketCache = new Map<string, BucketEntry>();
+const MAX_CACHED_BUCKETS = 64;
 
 // De-dupes concurrent token fetches for the same credentials so a cold isolate (or a
 // post-expiry burst) fires a single auth request instead of one per in-flight call.
@@ -84,11 +105,20 @@ export interface WorkerClientConfig {
   baseUrl?: string;
   authUrl?: string;
   timeoutMs?: number;
+  /** Explicit pacing override; when set, the JWT-advertised limits are not applied. */
+  rateLimit?: RateLimitConfig;
 }
+
+// Surfaces in `wrangler tail`; there is no structured logger on the Worker yet.
+const logRetry: RetryLogger = (event, context) =>
+  console.warn(JSON.stringify({ event, ...context }));
 
 export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
-  private config: Required<PlytixClientConfig>;
+  private config: Required<Omit<PlytixClientConfig, 'rateLimit'>>;
+  /** Set only when the caller passed an explicit `rateLimit`; otherwise pacing is shared per account. */
+  private readonly bucketOverride?: BucketEntry;
+  private rateLimits?: RateLimitWindow[];
   private attributeCache?: Map<string, PlytixAttributeDetail>;
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
   private cacheKeyPromise?: Promise<string>;
@@ -105,6 +135,77 @@ export class WorkerPlytixClient {
       authUrl: config.authUrl ?? DEFAULT_CONFIG.authUrl,
       timeoutMs: config.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
     };
+
+    if (config.rateLimit) {
+      if (isValidRateLimitConfig(config.rateLimit)) {
+        this.bucketOverride = { bucket: new TokenBucket(config.rateLimit), inFlight: 0 };
+      } else {
+        logRetry('plytix.rate_limit_config_ignored', { rateLimit: config.rateLimit });
+      }
+    }
+  }
+
+  /**
+   * Explicit override if configured, else the isolate-wide bucket for these credentials.
+   * With `pin`, the in-flight count is incremented in the same synchronous span as the
+   * lookup — an `await` between the two would leave a microtask in which another pair's
+   * eviction pass could drop a still-idle entry and split this account across two limiters.
+   */
+  private async getBucketEntry(pin = false): Promise<BucketEntry> {
+    if (this.bucketOverride) {
+      if (pin) this.bucketOverride.inFlight++;
+      return this.bucketOverride;
+    }
+    const cacheKey = await this.getCacheKey();
+    // Everything below runs without yielding.
+    const existing = bucketCache.get(cacheKey);
+    if (existing) {
+      // LRU touch: re-insert so eviction below prefers the least recently used pair.
+      bucketCache.delete(cacheKey);
+      bucketCache.set(cacheKey, existing);
+      if (pin) existing.inFlight++;
+      return existing;
+    }
+    // Bound the map: a long-lived isolate serving many distinct credential pairs must not
+    // grow without limit. Evict the least recently used *idle* entry — a bucket with live
+    // callers is never dropped, or the same account would end up with two limiters.
+    if (bucketCache.size >= MAX_CACHED_BUCKETS) {
+      for (const [key, entry] of bucketCache) {
+        if (entry.inFlight === 0) {
+          bucketCache.delete(key);
+          break;
+        }
+      }
+    }
+    const created: BucketEntry = {
+      bucket: new TokenBucket(DEFAULT_RATE_LIMIT),
+      inFlight: pin ? 1 : 0,
+    };
+    bucketCache.set(cacheKey, created);
+    return created;
+  }
+
+  /** Run `fn` with the bucket pinned against eviction for its duration. */
+  private async withBucket<T>(fn: (bucket: TokenBucket) => Promise<T>): Promise<T> {
+    const entry = await this.getBucketEntry(true);
+    try {
+      return await fn(entry.bucket);
+    } finally {
+      entry.inFlight--;
+    }
+  }
+
+  /** Account windows advertised in the auth JWT (known after the first request). */
+  getRateLimits(): RateLimitWindow[] | undefined {
+    return this.rateLimits;
+  }
+
+  private async applyAdvertisedRateLimits(jwt: string): Promise<void> {
+    const windows = decodeJwtRateLimits(jwt);
+    if (!windows) return;
+    this.rateLimits = windows;
+    if (this.bucketOverride) return;
+    (await this.getBucketEntry()).bucket.reconfigure(rateLimitConfigsFromWindows(windows));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -132,13 +233,20 @@ export class WorkerPlytixClient {
     const cached = tokenCache.get(cacheKey);
     if (cached && now < cached.exp - 60_000) {
       this.token = cached;
+      await this.applyAdvertisedRateLimits(cached.value);
       return cached.value;
     }
 
     // De-dupe concurrent fetches for the same credentials: if an auth request for this
-    // exact credential pair is already in flight, await it instead of starting another.
+    // exact credential pair is already in flight, await it instead of starting another —
+    // and adopt its result the same way the minting instance does.
     const inFlight = tokenInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      const value = await inFlight;
+      this.token = tokenCache.get(cacheKey);
+      await this.applyAdvertisedRateLimits(value);
+      return value;
+    }
 
     const fetchPromise = this.fetchToken(cacheKey);
     tokenInFlight.set(cacheKey, fetchPromise);
@@ -150,83 +258,62 @@ export class WorkerPlytixClient {
   }
 
   private async fetchToken(cacheKey: string): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
+    let response: Response;
     try {
-      const response = await fetch(this.config.authUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          api_key: this.config.apiKey,
-          api_password: this.config.apiPassword,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Authentication failed: ${response.status} - ${body}`,
-          response.status,
-          body
-        );
-      }
-
-      const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
-      const tokenData = result.data?.[0];
-
-      if (!tokenData?.access_token) {
-        throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
-      }
-
-      // Default to 15 minutes if expires_in not provided
-      const expiresIn = (tokenData.expires_in ?? 900) * 1000;
-      this.token = {
-        value: tokenData.access_token,
-        exp: Date.now() + expiresIn,
-      };
-
-      // Persist to module-level cache, keyed by the credential-pair digest.
-      tokenCache.set(cacheKey, this.token);
-
-      return this.token.value;
+      // Auth lives on a different host with its own limiter: retried on 429/5xx (the mint is
+      // idempotent) but not counted against our bucket.
+      response = await this.withBucket((bucket) =>
+        fetchWithRetry({
+          url: this.config.authUrl,
+          init: {
+            method: 'POST',
+            body: JSON.stringify({
+              api_key: this.config.apiKey,
+              api_password: this.config.apiPassword,
+            }),
+          },
+          method: 'POST',
+          path: '/auth/api/get-token',
+          bucket,
+          timeoutMs: this.config.timeoutMs,
+          log: logRetry,
+          countsAgainstBucket: false,
+          retryServerErrors: true,
+        })
+      );
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Auth request failed: ${error}`, undefined, error);
     }
-  }
 
-  // ─────────────────────────────────────────────────────────────
-  // Rate Limiting
-  // ─────────────────────────────────────────────────────────────
-
-  private parseRateLimitHeaders(headers: Headers): RateLimitInfo | undefined {
-    const limit = headers.get('x-ratelimit-limit');
-    const remaining = headers.get('x-ratelimit-remaining');
-    const reset = headers.get('x-ratelimit-reset');
-
-    if (limit && remaining && reset) {
-      return {
-        limit: parseInt(limit, 10),
-        remaining: parseInt(remaining, 10),
-        reset: parseInt(reset, 10),
-      };
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(
+        `Authentication failed: ${response.status} - ${body}`,
+        response.status,
+        body
+      );
     }
-    return undefined;
-  }
 
-  private async backoffOnRateLimit(rateLimitInfo?: RateLimitInfo): Promise<void> {
-    if (!rateLimitInfo || rateLimitInfo.remaining > 0) return;
+    const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
+    const tokenData = result.data?.[0];
 
-    const now = Date.now();
-    const resetTime = rateLimitInfo.reset * 1000; // Convert to milliseconds
-    const delay = Math.max(1000, resetTime - now + 100); // Add small buffer
+    if (!tokenData?.access_token) {
+      throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
+    }
 
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    // Default to 15 minutes if expires_in not provided
+    const expiresIn = (tokenData.expires_in ?? 900) * 1000;
+    this.token = {
+      value: tokenData.access_token,
+      exp: Date.now() + expiresIn,
+    };
+
+    // Persist to module-level cache, keyed by the credential-pair digest.
+    tokenCache.set(cacheKey, this.token);
+    await this.applyAdvertisedRateLimits(tokenData.access_token);
+
+    return this.token.value;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -235,66 +322,47 @@ export class WorkerPlytixClient {
 
   private async request<T = unknown>(
     endpoint: string,
-    options: RequestInit = {},
-    retries = 1
+    options: RequestInit = {}
   ): Promise<PlytixResult<T>> {
-    const token = await this.getToken();
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
     // Ensure no trailing slash (causes redirect that drops Authorization header)
     const url = `${this.config.baseUrl}${endpoint}`.replace(/\/+$/, '');
+    const method = (options.method ?? 'GET').toUpperCase();
 
+    let response: Response;
     try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-
-      const rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-
-      // Rate limited - backoff and retry
-      if (response.status === 429 && retries > 0) {
-        await this.backoffOnRateLimit(rateLimitInfo);
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Token expired - clear both caches and retry
-      if (response.status === 401 && retries > 0) {
-        tokenCache.delete(await this.getCacheKey());
-        this.token = undefined;
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Handle 204 No Content
-      if (response.status === 204) {
-        return { data: [] } as PlytixResult<T>;
-      }
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Request failed: ${response.status} - ${body}`,
-          response.status,
-          body,
-          rateLimitInfo
-        );
-      }
-
-      return (await response.json()) as PlytixResult<T>;
+      response = await this.withBucket((bucket) =>
+        fetchWithRetry({
+          url,
+          init: options,
+          method,
+          path: endpoint,
+          bucket,
+          timeoutMs: this.config.timeoutMs,
+          log: logRetry,
+          getToken: () => this.getToken(),
+          onUnauthorized: async () => {
+            // Token expired - clear both caches so the next attempt re-mints
+            tokenCache.delete(await this.getCacheKey());
+            this.token = undefined;
+          },
+        })
+      );
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Request failed: ${error}`, undefined, error);
     }
+
+    // Handle 204 No Content
+    if (response.status === 204) {
+      return { data: [] } as PlytixResult<T>;
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(`Request failed: ${response.status} - ${body}`, response.status, body);
+    }
+
+    return (await response.json()) as PlytixResult<T>;
   }
 
   // ─────────────────────────────────────────────────────────────
