@@ -39,7 +39,7 @@ import {
   decodeJwtRateLimits,
   fetchWithRetry,
   parseRateLimitSpec,
-  rateLimitConfigFromWindows,
+  rateLimitConfigsFromWindows,
   type RetryLogger,
 } from './rate-limit.js';
 import {
@@ -95,8 +95,7 @@ export class PlytixClient {
     const rateLimit: RateLimitConfig | undefined =
       config?.rateLimit ?? parseRateLimitSpec(process.env.PLYTIX_RATE_LIMIT);
     this.explicitRateLimit = rateLimit !== undefined;
-    const { limit, windowMs } = rateLimit ?? DEFAULT_RATE_LIMIT;
-    this.bucket = new TokenBucket(limit, windowMs);
+    this.bucket = new TokenBucket(rateLimit ?? DEFAULT_RATE_LIMIT);
   }
 
   /** Account windows advertised in the auth JWT (known after the first request). */
@@ -109,8 +108,7 @@ export class PlytixClient {
     if (!windows) return;
     this.rateLimits = windows;
     if (this.explicitRateLimit) return;
-    const derived = rateLimitConfigFromWindows(windows);
-    if (derived) this.bucket.reconfigure(derived);
+    this.bucket.reconfigure(rateLimitConfigsFromWindows(windows));
   }
 
   // ─────────────────────────────────────────────────────────────

@@ -36,7 +36,7 @@ import {
   TokenBucket,
   decodeJwtRateLimits,
   fetchWithRetry,
-  rateLimitConfigFromWindows,
+  rateLimitConfigsFromWindows,
   type RetryLogger,
 } from './rate-limit.js';
 import {
@@ -65,6 +65,11 @@ const DEFAULT_CONFIG = {
 // Keyed by a non-reversible digest of BOTH credentials so a cached token is only ever
 // reused for the exact api_key + api_password pair that minted it.
 const tokenCache = new Map<string, PlytixAuthToken>();
+
+// One pacer per credential pair per isolate. The Worker builds a client per HTTP request,
+// so a per-instance bucket would let N concurrent requests for the same account each burst
+// the full window and ignore each other's 429 penalties. Tokens are already shared this way.
+const bucketCache = new Map<string, TokenBucket>();
 
 // De-dupes concurrent token fetches for the same credentials so a cold isolate (or a
 // post-expiry burst) fires a single auth request instead of one per in-flight call.
@@ -104,9 +109,8 @@ const logRetry: RetryLogger = (event, context) =>
 export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<Omit<PlytixClientConfig, 'rateLimit'>>;
-  /** Per-instance (so per-request) pacing: stops one MCP call from self-tripping the window. */
-  private readonly bucket: TokenBucket;
-  private readonly explicitRateLimit: boolean;
+  /** Set only when the caller passed an explicit `rateLimit`; otherwise pacing is shared per account. */
+  private readonly bucketOverride?: TokenBucket;
   private rateLimits?: RateLimitWindow[];
   private attributeCache?: Map<string, PlytixAttributeDetail>;
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
@@ -125,9 +129,19 @@ export class WorkerPlytixClient {
       timeoutMs: config.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
     };
 
-    this.explicitRateLimit = config.rateLimit !== undefined;
-    const { limit, windowMs } = config.rateLimit ?? DEFAULT_RATE_LIMIT;
-    this.bucket = new TokenBucket(limit, windowMs);
+    if (config.rateLimit) this.bucketOverride = new TokenBucket(config.rateLimit);
+  }
+
+  /** Explicit override if configured, else the isolate-wide bucket for these credentials. */
+  private async getBucket(): Promise<TokenBucket> {
+    if (this.bucketOverride) return this.bucketOverride;
+    const cacheKey = await this.getCacheKey();
+    let bucket = bucketCache.get(cacheKey);
+    if (!bucket) {
+      bucket = new TokenBucket(DEFAULT_RATE_LIMIT);
+      bucketCache.set(cacheKey, bucket);
+    }
+    return bucket;
   }
 
   /** Account windows advertised in the auth JWT (known after the first request). */
@@ -135,13 +149,12 @@ export class WorkerPlytixClient {
     return this.rateLimits;
   }
 
-  private applyAdvertisedRateLimits(jwt: string): void {
+  private async applyAdvertisedRateLimits(jwt: string): Promise<void> {
     const windows = decodeJwtRateLimits(jwt);
     if (!windows) return;
     this.rateLimits = windows;
-    if (this.explicitRateLimit) return;
-    const derived = rateLimitConfigFromWindows(windows);
-    if (derived) this.bucket.reconfigure(derived);
+    if (this.bucketOverride) return;
+    (await this.getBucket()).reconfigure(rateLimitConfigsFromWindows(windows));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -169,14 +182,20 @@ export class WorkerPlytixClient {
     const cached = tokenCache.get(cacheKey);
     if (cached && now < cached.exp - 60_000) {
       this.token = cached;
-      this.applyAdvertisedRateLimits(cached.value);
+      await this.applyAdvertisedRateLimits(cached.value);
       return cached.value;
     }
 
     // De-dupe concurrent fetches for the same credentials: if an auth request for this
-    // exact credential pair is already in flight, await it instead of starting another.
+    // exact credential pair is already in flight, await it instead of starting another —
+    // and adopt its result the same way the minting instance does.
     const inFlight = tokenInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      const value = await inFlight;
+      this.token = tokenCache.get(cacheKey);
+      await this.applyAdvertisedRateLimits(value);
+      return value;
+    }
 
     const fetchPromise = this.fetchToken(cacheKey);
     tokenInFlight.set(cacheKey, fetchPromise);
@@ -203,7 +222,7 @@ export class WorkerPlytixClient {
         },
         method: 'POST',
         path: '/auth/api/get-token',
-        bucket: this.bucket,
+        bucket: await this.getBucket(),
         timeoutMs: this.config.timeoutMs,
         log: logRetry,
         countsAgainstBucket: false,
@@ -239,7 +258,7 @@ export class WorkerPlytixClient {
 
     // Persist to module-level cache, keyed by the credential-pair digest.
     tokenCache.set(cacheKey, this.token);
-    this.applyAdvertisedRateLimits(tokenData.access_token);
+    await this.applyAdvertisedRateLimits(tokenData.access_token);
 
     return this.token.value;
   }
@@ -263,7 +282,7 @@ export class WorkerPlytixClient {
         init: options,
         method,
         path: endpoint,
-        bucket: this.bucket,
+        bucket: await this.getBucket(),
         timeoutMs: this.config.timeoutMs,
         log: logRetry,
         getToken: () => this.getToken(),

@@ -7,7 +7,8 @@ import {
   isMutation,
   parseRateLimitBody,
   parseRetryAfterHeader,
-  rateLimitConfigFromWindows,
+  rateLimitConfigsFromWindows,
+  DEFAULT_RATE_LIMIT,
   MAX_BACKOFF_MS,
 } from '../rate-limit.js';
 import { PlytixError } from '../types.js';
@@ -114,18 +115,30 @@ describe('decodeJwtRateLimits', () => {
     expect(decodeJwtRateLimits(jwt({ user_claims: { account: { rate_limit: 'x' } } }))).toBeUndefined();
     expect(decodeJwtRateLimits('not-a-jwt')).toBeUndefined();
     expect(decodeJwtRateLimits('a.!!!.c')).toBeUndefined();
+    // Two segments = unsigned/truncated: never let it configure anything.
+    expect(decodeJwtRateLimits(`hdr.${encode({ user_claims: { account: { rate_limit: [{ limit: 1, window_size: 10 }] } } })}`)).toBeUndefined();
+  });
+
+  it('drops non-integer, non-finite, or non-positive windows', () => {
+    const token = `hdr.${Buffer.from(
+      '{"user_claims":{"account":{"rate_limit":[{"limit":1e309,"window_size":10},{"limit":50,"window_size":0.5},{"limit":0,"window_size":10},{"limit":50,"window_size":10}]}}}'
+    ).toString('base64url')}.sig`;
+    expect(decodeJwtRateLimits(token)).toEqual([{ limit: 50, windowSeconds: 10 }]);
   });
 });
 
-describe('rateLimitConfigFromWindows', () => {
-  it('takes 80% of the tightest window', () => {
+describe('rateLimitConfigsFromWindows', () => {
+  it('takes 80% of every window, tightest first', () => {
     expect(
-      rateLimitConfigFromWindows([
+      rateLimitConfigsFromWindows([
         { limit: 5000, windowSeconds: 3600 },
         { limit: 50, windowSeconds: 10 },
       ])
-    ).toEqual({ limit: 40, windowMs: 10_000 });
-    expect(rateLimitConfigFromWindows([])).toBeUndefined();
+    ).toEqual([
+      { limit: 40, windowMs: 10_000 },
+      { limit: 4000, windowMs: 3_600_000 },
+    ]);
+    expect(rateLimitConfigsFromWindows([])).toEqual([]);
   });
 });
 
@@ -149,8 +162,7 @@ describe('TokenBucket', () => {
     let now = 0;
     const sleeps: number[] = [];
     const bucket = new TokenBucket(
-      limit,
-      windowMs,
+      { limit, windowMs },
       () => now,
       async (ms) => {
         sleeps.push(ms);
@@ -196,7 +208,7 @@ describe('TokenBucket', () => {
 
   it('is FIFO under contention', async () => {
     vi.useFakeTimers();
-    const bucket = new TokenBucket(1, 1000);
+    const bucket = new TokenBucket({ limit: 1, windowMs: 1000 });
     const order: string[] = [];
     const a = bucket.take().then(() => order.push('a'));
     const b = bucket.take().then(() => order.push('b'));
@@ -204,6 +216,32 @@ describe('TokenBucket', () => {
     await vi.advanceTimersByTimeAsync(3000);
     await Promise.all([a, b, c]);
     expect(order).toEqual(['a', 'b', 'c']);
+  });
+
+  it('enforces every window — the hourly cap, not just the burst', async () => {
+    const { bucket, sleeps } = makeBucket(40, 10_000);
+    bucket.reconfigure([
+      { limit: 3, windowMs: 1000 },
+      { limit: 5, windowMs: 10_000 },
+    ]);
+    expect(bucket.configs).toEqual([
+      { limit: 3, windowMs: 1000 },
+      { limit: 5, windowMs: 10_000 },
+    ]);
+    for (let i = 0; i < 3; i++) await bucket.take(); // t = 0
+    await bucket.take(); // 4th: burst window full → +1 s
+    await bucket.take(); // 5th: fine at t = 1 s
+    await bucket.take(); // 6th: long window full → waits for the t = 0 stamps → t = 10 s
+    expect(sleeps).toEqual([1000, 9000]);
+  });
+
+  it('ignores invalid configuration instead of disabling or spinning', () => {
+    expect(new TokenBucket({ limit: 0, windowMs: 1000 }).config).toEqual(DEFAULT_RATE_LIMIT);
+    expect(new TokenBucket({ limit: 5, windowMs: Number.POSITIVE_INFINITY }).config).toEqual(DEFAULT_RATE_LIMIT);
+    const bucket = new TokenBucket({ limit: 5, windowMs: 1000 });
+    bucket.reconfigure([]);
+    bucket.reconfigure({ limit: -1, windowMs: 1000 });
+    expect(bucket.config).toEqual({ limit: 5, windowMs: 1000 });
   });
 
   it('reconfigure applies on the next take', async () => {
@@ -233,7 +271,7 @@ describe('fetchWithRetry', () => {
     const logs: Array<[string, Record<string, unknown>]> = [];
     const sleeps: number[] = [];
     let now = 1_000_000;
-    const bucket = new TokenBucket(40, 10_000, () => now, async (ms) => {
+    const bucket = new TokenBucket({ limit: 40, windowMs: 10_000 }, () => now, async (ms) => {
       sleeps.push(ms);
       now += ms;
     });

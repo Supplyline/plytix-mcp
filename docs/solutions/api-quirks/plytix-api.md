@@ -461,10 +461,10 @@ Notes:
   with `ttl` (ms until the next slot).
 - A 429 means the request was **not processed** — always safe to retry. 5xx is safe to retry
   only for reads (`GET`, `POST …/search`); a 5xx on a PATCH may have applied.
-- This server paces itself at **80 % of the tightest advertised window** (default 40 / 10 s
-  before the JWT is seen; `PLYTIX_RATE_LIMIT="40/10"` or `rateLimit` config overrides), retries
-  429/5xx up to 3× on a 1–2 s → 8–9 s jittered schedule, and fails fast when the server asks for
-  a wait longer than 15 s. Retries are logged as JSON lines (`plytix.retry`,
+- This server paces itself at **80 % of every advertised window** (default 40 / 10 s before
+  the JWT is seen; `PLYTIX_RATE_LIMIT="40/10"` or `rateLimit` config overrides), retries
+  429/5xx up to 3× (1–2 s, 2–3 s, 4–5 s, jittered), and fails fast when the server asks for a
+  wait longer than 15 s. Retries are logged as JSON lines (`plytix.retry`,
   `plytix.retry_aborted`) on stderr (stdio) / `console.warn` (Worker).
 
 ## 17. Minimal working sequence

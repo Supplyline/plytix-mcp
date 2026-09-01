@@ -168,7 +168,7 @@ describe('WorkerPlytixClient rate limiting', () => {
     expect(patchCalls).toBe(1);
   });
 
-  it('learns the account windows from the JWT, also when the token came from the module cache', async () => {
+  it('shares one bucket per credential pair across instances and learns limits from the cached token', async () => {
     vi.useFakeTimers(FAKE);
     const jwt = jwtWith([{ limit: 2, window_size: 10 }]);
     let productCalls = 0;
@@ -178,7 +178,8 @@ describe('WorkerPlytixClient rate limiting', () => {
     await first.searchProducts({});
     expect(first.getRateLimits()).toEqual([{ limit: 2, windowSeconds: 10 }]);
 
-    // Same credentials → token served from the module cache, limits still learned.
+    // Same credentials → token from the module cache, limits learned, and the *same* bucket:
+    // floor(2 · 0.8) = 1 per 10 s, and `first` already used that slot.
     const second = new WorkerPlytixClient({
       apiKey: `unit-test-key-${credentialSeq}`,
       apiPassword: `unit-test-password-${credentialSeq}`,
@@ -188,16 +189,34 @@ describe('WorkerPlytixClient rate limiting', () => {
     const pending = second.searchProducts({});
     await advance(0);
     expect(second.getRateLimits()).toEqual([{ limit: 2, windowSeconds: 10 }]);
-    await pending;
-
-    // floor(2 · 0.8) = 1 per 10 s on `second`'s own bucket → its next call waits
-    const third = second.searchProducts({});
-    const before = productCalls;
     await advance(9000);
-    expect(productCalls).toBe(before);
+    expect(productCalls).toBe(1);
     await advance(1500);
-    await third;
-    expect(productCalls).toBe(before + 1);
+    await pending;
+    expect(productCalls).toBe(2);
+  });
+
+  it('a client that joins an in-flight mint adopts the token and the advertised limits', async () => {
+    const jwt = jwtWith([{ limit: 30, window_size: 10 }]);
+    let authCalls = 0;
+    const { calls } = stubFetch(
+      (url) => (url === AUTH_URL ? (authCalls++, json({ data: [{ access_token: jwt, expires_in: 900 }] })) : undefined),
+      (url) => (productUrl(url) ? json({ data: [] }) : undefined)
+    );
+
+    const a = makeClient();
+    const b = new WorkerPlytixClient({
+      apiKey: `unit-test-key-${credentialSeq}`,
+      apiPassword: `unit-test-password-${credentialSeq}`,
+      baseUrl: BASE_URL,
+      authUrl: AUTH_URL,
+    });
+    await Promise.all([a.searchProducts({}), b.searchProducts({})]);
+
+    expect(authCalls).toBe(1);
+    expect(a.getRateLimits()).toEqual([{ limit: 30, windowSeconds: 10 }]);
+    expect(b.getRateLimits()).toEqual([{ limit: 30, windowSeconds: 10 }]);
+    expect(calls.filter(productUrl)).toHaveLength(2);
   });
 
   it('explicit rateLimit config wins over the JWT', async () => {

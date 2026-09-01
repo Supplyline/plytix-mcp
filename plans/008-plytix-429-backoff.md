@@ -91,6 +91,21 @@ Adversarial findings on the first draft of this plan:
   `penalize` — no point minting a token into a blown window.
 - **A9** Tests inject `rand` and use fake timers; no real sleeps, no `Math.random` in asserts.
 
+Codex adversarial review, round 1 (2026-09-01, on PR #39) — fixed in the same PR:
+- **C1** Worker built a bucket per request while sharing the token cache → bucket is now
+  per credential pair per isolate (`bucketCache`, like `tokenCache`); explicit `rateLimit`
+  config still gets a private bucket.
+- **C2** Dry-run path called `checkRowGuard` bare → a transport failure rejected the whole
+  batch. Now the same `runTransientRetry` + `stage: "read"` as the live path.
+- **C3** Batch PATCH retried on 5xx (pre-existing) → mutations retry on 429 only.
+- **C4** Only the tightest JWT window was enforced (40/10 s ⇒ 14 400/h vs 5 000/h cap) →
+  `TokenBucket` enforces every window.
+- **C5** Unvalidated bucket config / JWT values (`limit: 0` spins, `1e309` is `Infinity`) →
+  positive-integer validation; invalid input keeps the current config.
+- **C6** `tokenInFlight` waiters never adopted the token/limits; token acquired *after*
+  admission; 401 body not drained; 429/5xx body read outside the attempt timeout; `youch-core`
+  lockfile slip; docs claimed an unreachable 8–9 s step and "3 attempts".
+
 ## Current state (after #37)
 
 | | stdio `client.ts` | worker `worker-client.ts` |

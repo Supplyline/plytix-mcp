@@ -100,7 +100,7 @@ export function backoffDelayMs(
 export function decodeJwtRateLimits(jwt: string): RateLimitWindow[] | undefined {
   try {
     const parts = jwt.split('.');
-    if (parts.length < 2) return undefined;
+    if (parts.length !== 3) return undefined; // header.payload.signature or nothing
     const claims: unknown = JSON.parse(decodeBase64Url(parts[1]));
     const raw = (claims as { user_claims?: { account?: { rate_limit?: unknown } } })
       ?.user_claims?.account?.rate_limit;
@@ -109,7 +109,7 @@ export function decodeJwtRateLimits(jwt: string): RateLimitWindow[] | undefined 
     for (const entry of raw) {
       const limit = (entry as { limit?: unknown })?.limit;
       const windowSize = (entry as { window_size?: unknown })?.window_size;
-      if (typeof limit === 'number' && typeof windowSize === 'number' && limit > 0 && windowSize > 0) {
+      if (isPositiveInteger(limit) && isPositiveInteger(windowSize)) {
         windows.push({ limit, windowSeconds: windowSize });
       }
     }
@@ -117,6 +117,20 @@ export function decodeJwtRateLimits(jwt: string): RateLimitWindow[] | undefined 
   } catch {
     return undefined;
   }
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1;
+}
+
+/** A usable bucket window: positive finite limit, positive finite duration. */
+export function isValidRateLimitConfig(config: RateLimitConfig | undefined): config is RateLimitConfig {
+  return (
+    !!config &&
+    isPositiveInteger(config.limit) &&
+    Number.isFinite(config.windowMs) &&
+    config.windowMs > 0
+  );
 }
 
 function decodeBase64Url(segment: string): string {
@@ -138,14 +152,18 @@ export function parseRateLimitSpec(spec: string | undefined): RateLimitConfig | 
   return { limit, windowMs };
 }
 
-/** The bucket config we derive from JWT windows: the tightest window, at RATE_LIMIT_SHARE. */
-export function rateLimitConfigFromWindows(windows: RateLimitWindow[]): RateLimitConfig | undefined {
-  if (windows.length === 0) return undefined;
-  const tightest = windows.reduce((a, b) => (b.windowSeconds < a.windowSeconds ? b : a));
-  return {
-    limit: Math.max(1, Math.floor(tightest.limit * RATE_LIMIT_SHARE)),
-    windowMs: tightest.windowSeconds * 1000,
-  };
+/**
+ * Bucket configs derived from JWT windows: every window at RATE_LIMIT_SHARE, tightest first.
+ * Both windows matter — 40 / 10 s alone would allow 14 400 / h against a 5 000 / h cap.
+ */
+export function rateLimitConfigsFromWindows(windows: RateLimitWindow[]): RateLimitConfig[] {
+  return windows
+    .map((w) => ({
+      limit: Math.max(1, Math.floor(w.limit * RATE_LIMIT_SHARE)),
+      windowMs: w.windowSeconds * 1000,
+    }))
+    .filter(isValidRateLimitConfig)
+    .sort((a, b) => a.windowMs - b.windowMs);
 }
 
 /**
@@ -173,22 +191,29 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  * account window is blown for all in-flight workers, not just the one that saw it.
  */
 export class TokenBucket {
-  private stamps: number[] = [];
+  private windows: Array<{ limit: number; windowMs: number; stamps: number[] }> = [];
   private penaltyUntil = 0;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
-    private limit: number,
-    private windowMs: number,
+    config: RateLimitConfig | RateLimitConfig[],
     private readonly now: () => number = Date.now,
     private readonly sleep: (ms: number) => Promise<void> = defaultSleep
-  ) {}
-
-  get config(): RateLimitConfig {
-    return { limit: this.limit, windowMs: this.windowMs };
+  ) {
+    this.reconfigure(config);
   }
 
-  /** Resolves when a slot is free and no penalty is active. */
+  /** The tightest window (for logs/tests); see `configs` for all of them. */
+  get config(): RateLimitConfig {
+    const { limit, windowMs } = this.windows[0];
+    return { limit, windowMs };
+  }
+
+  get configs(): RateLimitConfig[] {
+    return this.windows.map(({ limit, windowMs }) => ({ limit, windowMs }));
+  }
+
+  /** Resolves when every window has a free slot and no penalty is active. */
   take(): Promise<void> {
     const turn = this.queue.then(() => this.acquire());
     this.queue = turn.catch(() => undefined);
@@ -206,21 +231,41 @@ export class TokenBucket {
     if (wait > 0) await this.sleep(wait);
   }
 
-  reconfigure(config: RateLimitConfig): void {
-    this.limit = config.limit;
-    this.windowMs = config.windowMs;
+  /**
+   * Replace the windows. Invalid entries are dropped; if nothing valid remains the current
+   * configuration (or the default, on construction) is kept — a bad JWT must never turn
+   * pacing off or spin it forever.
+   */
+  reconfigure(config: RateLimitConfig | RateLimitConfig[]): void {
+    const valid = (Array.isArray(config) ? config : [config])
+      .filter(isValidRateLimitConfig)
+      .sort((a, b) => a.windowMs - b.windowMs);
+    if (valid.length === 0) {
+      if (this.windows.length === 0) {
+        this.windows = [{ ...DEFAULT_RATE_LIMIT, stamps: [] }];
+      }
+      return;
+    }
+    // Keep the history of any window we already track so a reconfigure can't reset a burst.
+    this.windows = valid.map(({ limit, windowMs }) => ({
+      limit,
+      windowMs,
+      stamps: this.windows.find((w) => w.windowMs === windowMs)?.stamps ?? [],
+    }));
   }
 
   private async acquire(): Promise<void> {
     for (;;) {
       const now = this.now();
-      this.stamps = this.stamps.filter((stamp) => stamp + this.windowMs > now);
-      const penaltyWait = this.penaltyUntil - now;
-      const windowWait =
-        this.stamps.length >= this.limit ? this.stamps[0] + this.windowMs - now : 0;
-      const wait = Math.max(penaltyWait, windowWait);
+      let wait = this.penaltyUntil - now;
+      for (const window of this.windows) {
+        window.stamps = window.stamps.filter((stamp) => stamp + window.windowMs > now);
+        if (window.stamps.length >= window.limit) {
+          wait = Math.max(wait, window.stamps[0] + window.windowMs - now);
+        }
+      }
       if (wait <= 0) {
-        this.stamps.push(now);
+        for (const window of this.windows) window.stamps.push(now);
         return;
       }
       await this.sleep(wait);
@@ -271,32 +316,47 @@ export async function fetchWithRetry(options: RetryingFetchOptions): Promise<Res
   let rateRetries = 0;
 
   for (;;) {
-    if (countsAgainstBucket) await options.bucket.take();
-    else await options.bucket.waitForPenalty();
-
+    // Token first: minting may reconfigure the bucket from the JWT, and the mint is what
+    // tells us the account's real windows — admit against those, not the cold default.
     const headers = new Headers(options.init.headers);
     if (options.getToken) headers.set('Authorization', `Bearer ${await options.getToken()}`);
     if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+
+    if (countsAgainstBucket) await options.bucket.take();
+    else await options.bucket.waitForPenalty();
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
     let response: Response;
     try {
       response = await fetch(options.url, { ...options.init, headers, signal: controller.signal });
-    } finally {
+    } catch (error) {
       clearTimeout(timeout);
+      throw error;
     }
 
     if (response.status === 401 && options.getToken && authRetries < 1) {
+      clearTimeout(timeout);
       authRetries++;
+      await response.arrayBuffer().catch(() => undefined); // release the connection
       await options.onUnauthorized?.();
       continue;
     }
 
     const retryableServerError = response.status >= 500 && retryServerErrors;
-    if (response.status !== 429 && !retryableServerError) return response;
+    if (response.status !== 429 && !retryableServerError) {
+      // The caller reads this body; the per-attempt timeout ends here as it always has.
+      clearTimeout(timeout);
+      return response;
+    }
 
-    const body = await response.text();
+    // Still under the attempt timeout: a stalled 429/5xx body must not hang the retry loop.
+    let body: string;
+    try {
+      body = await response.text();
+    } finally {
+      clearTimeout(timeout);
+    }
     const hit: RateLimitHit | undefined =
       response.status === 429 ? parseRateLimitBody(body) ?? {} : undefined;
     const headerWait = parseRetryAfterHeader(response.headers.get('Retry-After'), now());

@@ -171,7 +171,16 @@ export async function executeBatchUpdate(
               concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
               requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
             },
-            (row) => checkRowGuard(ops, row)
+            (row) =>
+              runTransientRetry(() => checkRowGuard(ops, row)).catch(
+                (error): BatchUpdateFailure => ({
+                  index: row.index,
+                  key: row.key,
+                  product_id: row.productId,
+                  stage: 'read',
+                  errors: parsePlytixErrors(error),
+                })
+              )
           )
         : [];
     const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
@@ -209,7 +218,10 @@ export async function executeBatchUpdate(
     )
     .map((result) => result.success);
   const allFailures = [...failures, ...patchFailures];
-  const conflictFailures = patchFailures.filter((failure) => failure.stage === 'conflict');
+  // Rows whose guard read failed (transport) or drifted (conflict) never reached PATCH.
+  const conflictFailures = patchFailures.filter(
+    (failure) => failure.stage === 'conflict' || failure.stage === 'read'
+  );
 
   return finishedResult({
     total,
@@ -341,7 +353,7 @@ async function patchRowWithRetry(
 
   let guardFailure: BatchUpdateFailure | undefined;
   try {
-    guardFailure = await runTransientRetry(() => checkRowGuard(ops, row), retries);
+    guardFailure = await runTransientRetry(() => checkRowGuard(ops, row), { retries });
   } catch (error) {
     return failure('read', parsePlytixErrors(error));
   }
@@ -352,7 +364,10 @@ async function patchRowWithRetry(
   const body = buildPatchBody(row.item);
   let result: PlytixResult<PlytixProduct>;
   try {
-    result = await runTransientRetry(() => ops.updateProduct(row.productId, body), retries);
+    result = await runTransientRetry(() => ops.updateProduct(row.productId, body), {
+      retries,
+      mutation: true,
+    });
   } catch (error) {
     return failure('patch', parsePlytixErrors(error));
   }

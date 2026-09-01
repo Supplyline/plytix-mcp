@@ -690,7 +690,8 @@ describe('batch update transport failures', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const result = await pending;
 
-    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 0 });
+    // A read failure skipped its PATCH, so it counts as skipped like a conflict does.
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 1 });
     expect(result.failures[0]).toMatchObject({ key: 'GUARDED', stage: 'read' });
     expect(result.failures[0]?.errors[0]?.msg).toMatch(/^429 rate limited after 4 attempts/);
     expect(ops.getProduct).toHaveBeenCalledTimes(4); // client budget + the runner's 3 retries
@@ -713,6 +714,53 @@ describe('batch update transport failures', () => {
 
     expect(result.failures[0]).toMatchObject({ stage: 'read' });
     expect(ops.getProduct).toHaveBeenCalledTimes(1);
+  });
+
+  it('dry-run guard reads that fail at the transport level are row failures, not a rejected batch', async () => {
+    vi.useFakeTimers();
+    const ops = makeOps({
+      resolved: { A: [{ id: 'product-a', sku: 'A' }], B: [{ id: 'product-b', sku: 'B' }] },
+      get: async (productId) => {
+        if (productId === 'product-a') throw rateLimited();
+        return { data: [{ id: productId, status: 'ACTIVE' }] };
+      },
+    });
+
+    const pending = executeBatchUpdate(
+      ops,
+      [
+        { sku: 'A', attributes: { google_detail: 'x' }, if_match: { status: 'ACTIVE' } },
+        { sku: 'B', attributes: { google_detail: 'x' }, if_match: { status: 'ACTIVE' } },
+      ],
+      { maxItems: 250, requestDelayMs: 0, dryRun: true }
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    expect(result.status).toBe('finished');
+    expect(result.summary).toEqual({ total: 2, succeeded: 0, failed: 1, skipped: 1 });
+    expect(result.failures).toEqual([
+      expect.objectContaining({ key: 'A', stage: 'read' }),
+    ]);
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('does not replay a PATCH after a 5xx — the write may have landed', async () => {
+    const ops = makeOps({
+      resolved: { ROW: [{ id: 'product-1', sku: 'ROW' }] },
+      update: async () => {
+        throw new PlytixError('Request failed: 502 - bad gateway', 502, 'bad gateway');
+      },
+    });
+
+    const result = await executeBatchUpdate(ops, [{ sku: 'ROW', attributes: { google_detail: 'x' } }], {
+      maxItems: 250,
+      requestDelayMs: 0,
+    });
+
+    expect(ops.updateProduct).toHaveBeenCalledTimes(1);
+    expect(result.failures[0]).toMatchObject({ stage: 'patch' });
+    expect(result.summary).toEqual({ total: 1, succeeded: 0, failed: 1, skipped: 0 });
   });
 
   it('spaces PATCH retries out on the shared backoff schedule', async () => {
