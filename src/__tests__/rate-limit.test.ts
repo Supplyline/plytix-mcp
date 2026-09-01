@@ -267,6 +267,20 @@ describe('TokenBucket', () => {
     await bucket.take();
   });
 
+  it('the admission cap counts time already spent queued behind other callers', async () => {
+    // 1 per 20 s: the 2nd caller waits 20 s (fine); the 3rd would sit 20 s queued + 20 s more.
+    const { bucket, sleeps } = makeBucket(1, 20_000);
+    const a = bucket.take();
+    const b = bucket.take();
+    const c = bucket.take().catch((e: unknown) => e);
+    await a;
+    await b;
+    const error = await c;
+    expect(sleeps).toEqual([20_000]);
+    expect(error).toBeInstanceOf(PlytixError);
+    expect((error as PlytixError).rateLimit?.retryAfterMs).toBe(20_000);
+  });
+
   it('waitForPenalty honors a penalty extended while sleeping', async () => {
     const { bucket, sleeps } = makeBucket(40, 10_000);
     bucket.penalize(1000);

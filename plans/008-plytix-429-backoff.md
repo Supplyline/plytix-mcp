@@ -116,6 +116,10 @@ Worker's `bucketCache` is bounded (64). Declined: "youch-core still in lockfile"
 pre-existing dev transitive — only the accidental version edit was ours, and it is reverted);
 "callers admitted before the first 429 aren't parked" (inherent to in-flight requests).
 
+Round 3 — all round-2 items verified; two more fixed: the admission cap now covers total
+queue residence (time queued behind others + remaining wait), and the Worker `bucketCache`
+evicts least-recently-used rather than oldest-inserted so a hot bucket is never split.
+
 ## Current state (after #37)
 
 | | stdio `client.ts` | worker `worker-client.ts` |

@@ -226,7 +226,8 @@ export class TokenBucket {
    * MAX_ADMISSION_WAIT_MS — the caller should surface that, not sit on it.
    */
   take(): Promise<void> {
-    const turn = this.queue.then(() => this.acquire());
+    const enqueuedAt = this.now(); // the cap covers time spent queued behind others, too
+    const turn = this.queue.then(() => this.acquire(enqueuedAt));
     this.queue = turn.catch(() => undefined);
     return turn;
   }
@@ -259,7 +260,7 @@ export class TokenBucket {
     else if (this.windows.length === 0) this.windows = [{ ...DEFAULT_RATE_LIMIT }];
   }
 
-  private async acquire(): Promise<void> {
+  private async acquire(enqueuedAt: number): Promise<void> {
     for (;;) {
       const now = this.now();
       const horizon = this.windows[this.windows.length - 1].windowMs;
@@ -276,7 +277,9 @@ export class TokenBucket {
         this.stamps.push(now);
         return;
       }
-      if (wait > MAX_ADMISSION_WAIT_MS) {
+      // Total residence (already queued + still to wait), not just this sleep: under
+      // contention the FIFO turn itself can arrive long after the caller asked.
+      if (now - enqueuedAt + wait > MAX_ADMISSION_WAIT_MS) {
         const seconds = Math.ceil(wait / 1000);
         throw new PlytixError(
           `429 rate limit window exhausted locally: next slot in ${seconds}s (cap ${MAX_ADMISSION_WAIT_MS / 1000}s); retry later`,

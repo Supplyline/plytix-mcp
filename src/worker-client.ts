@@ -145,9 +145,16 @@ export class WorkerPlytixClient {
     if (this.bucketOverride) return this.bucketOverride;
     const cacheKey = await this.getCacheKey();
     let bucket = bucketCache.get(cacheKey);
+    if (bucket) {
+      // LRU touch: re-insert so eviction below always removes the least recently used pair,
+      // never a bucket that live requests are pacing against.
+      bucketCache.delete(cacheKey);
+      bucketCache.set(cacheKey, bucket);
+      return bucket;
+    }
     if (!bucket) {
       // Bound the map: a long-lived isolate serving many distinct credential pairs must not
-      // grow without limit. Oldest-inserted goes first; losing it only forgets pacing history.
+      // grow without limit. Least recently used goes first; losing it only forgets history.
       if (bucketCache.size >= MAX_CACHED_BUCKETS) {
         const oldest = bucketCache.keys().next().value;
         if (oldest !== undefined) bucketCache.delete(oldest);
