@@ -19,7 +19,7 @@ A **lightweight, stateless Model Context Protocol (MCP) server** that provides A
 
 ### Prerequisites
 
-- **Node.js 18+** (Node 20+ recommended)
+- **Node.js 20+**
 - **Plytix PIM account** with API access
 
 ### Setup
