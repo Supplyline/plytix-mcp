@@ -7,6 +7,21 @@
 > Plan 002 (and possibly 004) land first — locate `doBuildAttributeCache` in the live code;
 > if 004 landed, the change goes in `src/core/client.ts` instead.
 
+## Outcome (2026-09-01)
+
+**Path A.** Step 0's probe settled the open question: search rows DO carry populated
+`options` for dropdown/multiselect, so no per-id fetches remain in the cache build at all.
+Two findings beyond the plan:
+
+- `description` is also available from search (the plan's field list omitted it) and IS
+  surfaced by `attributes_get` on both surfaces, so it had to be requested or the tool would
+  have silently lost a field.
+- `filter_type` differs between search and the per-id GET for the same attribute, and
+  `created` is search-only-absent. Neither is consumed; both are documented and excluded.
+
+Live result on the Supplyline account (215 attributes): **3 search calls, 0 per-id GETs,
+4.6 s cold** (was 216 requests / ~55 s), warm cache 0 requests.
+
 ## Status
 
 - **Priority**: P3

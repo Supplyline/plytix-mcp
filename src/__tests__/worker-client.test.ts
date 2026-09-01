@@ -281,3 +281,49 @@ describe('WorkerPlytixClient rate limiting', () => {
     expect(productCalls).toBe(2);
   });
 });
+
+describe('WorkerPlytixClient attribute cache', () => {
+  const UNPACED = { rateLimit: { limit: 10_000, windowMs: 1000 } };
+
+  it('builds from search rows — no per-id GETs, options included', async () => {
+    const rows = Array.from({ length: 150 }, (_, i) => ({
+      id: `a${i}`,
+      label: `label_a${i}`,
+      name: `Name a${i}`,
+      type_class: i === 0 ? 'DropdownAttribute' : 'TextAttribute',
+      ...(i === 0 ? { options: ['Full', 'Standard'] } : {}),
+    }));
+    let searchCalls = 0;
+    const { calls } = stubFetch(authRoute(), (url, init) => {
+      if (!url.includes('/api/v1/attributes/product/search')) return undefined;
+      searchCalls++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        pagination?: { page?: number; page_size?: number };
+      };
+      const page = body.pagination?.page ?? 1;
+      const size = body.pagination?.page_size ?? 100;
+      return json({ data: rows.slice((page - 1) * size, page * size) });
+    });
+
+    const client = makeClient(UNPACED);
+    expect(await client.getAttributeOptions('label_a0')).toEqual(['Full', 'Standard']);
+    expect((await client.getAttributeByLabel('label_a149'))?.name).toBe('Name a149');
+    expect(searchCalls).toBe(2); // 150 rows at page_size 100
+    expect(
+      calls.filter((u) => /\/api\/v1\/attributes\/product\/[^/?]+$/.test(u) && !u.includes('/search'))
+    ).toHaveLength(0);
+  });
+
+  it('surfaces a build failure when most rows have no label', async () => {
+    stubFetch(authRoute(), (url) =>
+      url.includes('/api/v1/attributes/product/search')
+        ? json({ data: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3', label: 'label_a3' }] })
+        : undefined
+    );
+
+    const client = makeClient(UNPACED);
+    await expect(client.getAttributeByLabel('label_a3')).rejects.toThrow(
+      /2\/3 attributes returned without a label/
+    );
+  });
+});

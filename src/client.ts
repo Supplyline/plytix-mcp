@@ -32,7 +32,7 @@ import type {
   ProductBatchExportResult,
   ProductBatchExportToFileInput,
 } from './types.js';
-import { PlytixError } from './types.js';
+import { ATTRIBUTE_CACHE_FIELDS, PlytixError } from './types.js';
 import {
   DEFAULT_RATE_LIMIT,
   TokenBucket,
@@ -459,29 +459,44 @@ export class PlytixClient {
    * Search for attribute IDs. Returns minimal data (id + filter_type).
    * Use getAttribute() to get full details including options.
    */
-  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+  /**
+   * Page through every product attribute, fully populated.
+   *
+   * Requesting the cache's field set up front means the whole catalogue arrives in
+   * ceil(N/100) requests. The previous walk fetched ids here and then one GET per id —
+   * 216 requests on a 215-attribute account, which reliably tripped the 50 req/10 s
+   * window and left the cache missing whatever 429'd.
+   */
+  async searchAttributeDetails(pageSize = 100): Promise<PlytixAttributeDetail[]> {
     const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
-    const attrIds: string[] = [];
+    const rows: PlytixAttributeDetail[] = [];
     let page = 1;
 
     while (page <= MAX_PAGES) {
-      const result = await this.request<{ id: string; filter_type?: string }>(
+      const result = await this.request<PlytixAttributeDetail>(
         '/api/v1/attributes/product/search',
         {
           method: 'POST',
           body: JSON.stringify({
+            attributes: ATTRIBUTE_CACHE_FIELDS,
             pagination: { page, page_size: pageSize },
           }),
         }
       );
 
       if (!result.data || result.data.length === 0) break;
-      attrIds.push(...result.data.map((a) => a.id));
+      rows.push(...result.data);
       if (result.data.length < pageSize) break;
       page++;
     }
 
-    return attrIds;
+    return rows;
+  }
+
+  /** Ids only. Prefer `searchAttributeDetails` — same request count, full rows. */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const rows = await this.searchAttributeDetails(pageSize);
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -518,39 +533,26 @@ export class PlytixClient {
   private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
     const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-    const attrIds = await this.searchAttributeIds();
+    const rows = await this.searchAttributeDetails();
 
-    if (attrIds.length === 0) {
+    if (rows.length === 0) {
       throw new PlytixError(
         'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
       );
     }
 
-    // Fetch in batches to avoid overwhelming Plytix rate limits
-    const BATCH_SIZE = 10;
-    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
-    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
-      const batch = attrIds.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.allSettled(
-        batch.map((id) => this.getAttributeById(id))
-      );
-      allResults.push(...batchResults);
-    }
-
     const byLabel = new Map<string, PlytixAttributeDetail>();
-    let failures = 0;
-    for (const result of allResults) {
-      if (result.status === 'fulfilled' && result.value?.label) {
-        byLabel.set(result.value.label, result.value);
-      } else {
-        failures++;
-      }
+    let unusable = 0;
+    for (const row of rows) {
+      if (row?.label) byLabel.set(row.label, row);
+      else unusable++;
     }
 
-    // If >20% of fetches failed or returned empty, don't cache — surface the error
-    if (failures > attrIds.length * 0.2) {
+    // A label is what the cache is keyed by. If more than 20% of rows arrive without one
+    // the response shape is wrong; surface that instead of caching a cripple.
+    if (unusable > rows.length * 0.2) {
       throw new PlytixError(
-        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
+        `Attribute cache build failed: ${unusable}/${rows.length} attributes returned without a label`
       );
     }
 

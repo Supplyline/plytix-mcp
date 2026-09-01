@@ -175,7 +175,7 @@ describe('PlytixClient getProductAttributes', () => {
 // Attribute pagination + cache build
 // ─────────────────────────────────────────────────────────────
 
-function attrSearchRoute(ids: string[], pageSize = 100): Route {
+function attrSearchRoute(rows: Array<Record<string, unknown>>, pageSize = 100): Route {
   return async (url, init) => {
     if (!url.includes('/api/v1/attributes/product/search')) return undefined;
     const body = JSON.parse(String(init?.body ?? '{}')) as {
@@ -183,32 +183,31 @@ function attrSearchRoute(ids: string[], pageSize = 100): Route {
     };
     const page = body.pagination?.page ?? 1;
     const size = body.pagination?.page_size ?? pageSize;
-    const slice = ids.slice((page - 1) * size, page * size);
-    return json({ data: slice.map((id) => ({ id })) });
+    const slice = rows.slice((page - 1) * size, page * size);
+    return json({ data: slice });
   };
 }
 
-function attrDetailRoute(
-  detail: (id: string) => { label?: string } | 'fail'
-): Route {
-  return (url) => {
-    const m = url.match(/\/api\/v1\/attributes\/product\/([^/?]+)$/);
-    if (!m || url.includes('/search')) return undefined;
-    const result = detail(m[1]);
-    // 422, not 5xx: a 5xx on a GET is now retried with real backoff, which is not what
-    // these tests are about.
-    if (result === 'fail') return json({ error: 'boom' }, 422);
-    return json({ data: [{ id: m[1], ...result }] });
-  };
-}
+/** A search row as Plytix returns it when the `attributes` param is sent: fully populated. */
+const attrRow = (id: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  label: `label_${id}`,
+  name: `Name ${id}`,
+  type_class: 'TextAttribute',
+  ...extra,
+});
+
+/** Any GET of a single attribute — the collapsed cache build must never issue one. */
+const perIdGets = (calls: string[]) =>
+  calls.filter((u) => /\/api\/v1\/attributes\/product\/[^/?]+$/.test(u) && !u.includes('/search'));
 
 describe('PlytixClient attribute cache', () => {
   it('caps pagination at MAX_PAGES (50) even if the API never returns a short page', async () => {
     // Every page is full → without the cap this would loop forever.
-    const ids = Array.from({ length: 100 }, (_, i) => `id${i}`);
+    const rows = Array.from({ length: 100 }, (_, i) => attrRow(`id${i}`));
     const { calls } = stubFetch(authRoute(), (url) =>
       url.includes('/api/v1/attributes/product/search')
-        ? json({ data: ids.map((id) => ({ id })) }) // always full
+        ? json({ data: rows }) // always full
         : undefined
     );
 
@@ -220,12 +219,7 @@ describe('PlytixClient attribute cache', () => {
   });
 
   it('deduplicates concurrent cache builds (one search pass for parallel callers)', async () => {
-    const ids = ['a1', 'a2'];
-    const { calls } = stubFetch(
-      authRoute(),
-      attrSearchRoute(ids),
-      attrDetailRoute((id) => ({ label: `label_${id}` }))
-    );
+    const { calls } = stubFetch(authRoute(), attrSearchRoute(['a1', 'a2'].map((id) => attrRow(id))));
 
     const client = makeClient(UNPACED);
     const [a, b] = await Promise.all([
@@ -238,43 +232,77 @@ describe('PlytixClient attribute cache', () => {
     expect(calls.filter((u) => u.includes('/attributes/product/search'))).toHaveLength(1);
   });
 
-  it('throws PlytixError when more than 20% of detail fetches fail', async () => {
-    const ids = ['a1', 'a2', 'a3', 'a4', 'a5'];
+  it('throws PlytixError when more than 20% of rows come back without a label', async () => {
     stubFetch(
       authRoute(),
-      attrSearchRoute(ids),
-      attrDetailRoute((id) => (id === 'a1' || id === 'a2' ? 'fail' : { label: `label_${id}` }))
+      attrSearchRoute([
+        { id: 'a1' }, // no label — unusable as a cache key
+        { id: 'a2' },
+        attrRow('a3'),
+        attrRow('a4'),
+        attrRow('a5'),
+      ])
     );
 
     const client = makeClient(UNPACED);
     await expect(client.getAttributeByLabel('label_a3')).rejects.toThrow(PlytixError);
     await expect(client.getAttributeByLabel('label_a3')).rejects.toThrow(
-      /Attribute cache build failed/
+      /2\/5 attributes returned without a label/
     );
   });
 
-  it('fetches attribute details in batches of at most 10', async () => {
-    const ids = Array.from({ length: 25 }, (_, i) => `a${i}`);
-    let inFlight = 0;
-    let maxInFlight = 0;
-    stubFetch(authRoute(), attrSearchRoute(ids), async (url) => {
-      const m = url.match(/\/api\/v1\/attributes\/product\/(a\d+)$/);
-      if (!m) return undefined;
-      inFlight++;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      // A macrotask, not a microtask: bucket admission is a FIFO promise chain, so
-      // siblings need a real tick to all reach fetch().
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      inFlight--;
-      return json({ data: [{ id: m[1], label: `label_${m[1]}` }] });
+  it('tolerates a minority of unlabelled rows', async () => {
+    stubFetch(
+      authRoute(),
+      attrSearchRoute([{ id: 'a1' }, ...Array.from({ length: 9 }, (_, i) => attrRow(`a${i + 2}`))])
+    );
+
+    const client = makeClient(UNPACED);
+    expect((await client.getAttributeByLabel('label_a2'))?.label).toBe('label_a2');
+  });
+
+  it('builds 250 attributes from 3 search calls and no per-id GETs', async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => attrRow(`a${i}`));
+    const { calls } = stubFetch(authRoute(), attrSearchRoute(rows));
+
+    const client = makeClient(UNPACED);
+    const attr = await client.getAttributeByLabel('label_a249');
+
+    expect(attr?.name).toBe('Name a249');
+    expect(calls.filter((u) => u.includes('/attributes/product/search'))).toHaveLength(3);
+    expect(perIdGets(calls)).toHaveLength(0);
+  });
+
+  it('requests the cache field set so options arrive on the search rows', async () => {
+    const bodies: string[] = [];
+    const { calls } = stubFetch(authRoute(), (url, init) => {
+      if (!url.includes('/api/v1/attributes/product/search')) return undefined;
+      bodies.push(String(init?.body ?? ''));
+      return json({
+        data: [
+          attrRow('a1', { type_class: 'DropdownAttribute', options: ['Full', 'Standard'] }),
+          attrRow('a2', { description: 'plain text attribute' }),
+        ],
+      });
     });
 
     const client = makeClient(UNPACED);
-    const attr = await client.getAttributeByLabel('label_a0');
+    expect(await client.getAttributeOptions('label_a1')).toEqual(['Full', 'Standard']);
+    expect((await client.getAttributeByLabel('label_a2'))?.description).toBe(
+      'plain text attribute'
+    );
+    expect(perIdGets(calls)).toHaveLength(0);
 
-    expect(attr?.label).toBe('label_a0');
-    expect(maxInFlight).toBeGreaterThan(1);
-    expect(maxInFlight).toBeLessThanOrEqual(10);
+    const requested = JSON.parse(bodies[0]).attributes as string[];
+    expect(requested).toEqual(['label', 'name', 'type_class', 'options', 'groups', 'description']);
+  });
+
+  it('returns empty options for a non-option attribute, and null for an unknown label', async () => {
+    stubFetch(authRoute(), attrSearchRoute([attrRow('a1')]));
+
+    const client = makeClient(UNPACED);
+    expect(await client.getAttributeOptions('label_a1')).toEqual([]);
+    expect(await client.getAttributeOptions('nope')).toBeNull();
   });
 
   it('throws PlytixError when the account has no attributes at all', async () => {

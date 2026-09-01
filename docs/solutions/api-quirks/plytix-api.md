@@ -405,6 +405,19 @@ Product attributes are still documented under v1.
 
 - `GET /api/v1/attributes/product/:product_attribute_id`
 - `PATCH /api/v1/attributes/product/:product_attribute_id`
+- `POST /api/v1/attributes/product/search`
+
+**Search returns full attribute rows — don't loop GETs** (verified live 2026-09-01). Passing
+`attributes: ["label","name","type_class","options","groups","description"]` to the search
+endpoint returns every one of those fields populated, **including `options` for
+dropdown/multiselect**. A 215-attribute account is 3 requests at `page_size` 100 instead of
+1 search + 215 GETs. Two caveats:
+
+- `created` is never returned by search (`modified` is). The per-id GET has both, plus
+  `created_at`, the user-audit blobs, `manual_sorting`, `restricted`, `sort_ascending`.
+- **`filter_type` disagrees between the two surfaces.** For the same attribute, search
+  reports the attribute's own type (`DropdownAttribute`) while the GET reports the underlying
+  filter primitive (`TextAttribute`). Don't compare the two, and don't cache one as the other.
 
 Common type classes:
 
