@@ -25,6 +25,15 @@ async function advance(ms: number, step = 250): Promise<void> {
     elapsed += chunk;
   } while (elapsed < ms);
 }
+/**
+ * Pump zero-time steps until `ready()` holds. The credential digest (`crypto.subtle`) resolves
+ * on the real event loop, so how many pumps a request needs before its first fetch depends on
+ * the Node version — never assert on fetch counts before settling on it.
+ */
+async function settle(ready: () => boolean, maxPumps = 200): Promise<void> {
+  for (let i = 0; i < maxPumps && !ready(); i++) await advance(0);
+  expect(ready()).toBe(true);
+}
 
 // The Worker client caches tokens at module level per credential pair, so every test
 // gets its own credentials to stay independent.
@@ -98,7 +107,8 @@ describe('WorkerPlytixClient rate limiting', () => {
 
     const client = makeClient();
     const pending = client.searchProducts({});
-    await advance(900);
+    await settle(() => productCalls === 1);
+    await advance(900); // first retry is ≥ 1 s out
     expect(productCalls).toBe(1);
     await advance(2000);
     expect((await pending).data?.[0]?.id).toBe('p1');
@@ -187,7 +197,7 @@ describe('WorkerPlytixClient rate limiting', () => {
       authUrl: AUTH_URL,
     });
     const pending = second.searchProducts({});
-    await advance(0);
+    await settle(() => second.getRateLimits() !== undefined);
     expect(second.getRateLimits()).toEqual([{ limit: 2, windowSeconds: 10 }]);
     await advance(9000);
     expect(productCalls).toBe(1);
@@ -237,8 +247,7 @@ describe('WorkerPlytixClient rate limiting', () => {
 
     // The hot account's request is parked on a 5 s penalty…
     const parked = hot(1).searchProducts({ attributes: ['hot'] });
-    await advance(100);
-    expect(hotCalls).toBe(1);
+    await settle(() => hotCalls === 1);
 
     // …while 70 other credential pairs churn through the isolate (cache bound is 64).
     for (let i = 0; i < 70; i++) {
@@ -248,7 +257,7 @@ describe('WorkerPlytixClient rate limiting', () => {
     // A second instance for the hot account must land on the SAME bucket and wait out the penalty.
     const sibling = hot(1).searchProducts({ attributes: ['hot'] });
     await advance(3000);
-    expect(hotCalls).toBe(1);
+    expect(hotCalls).toBe(1); // still parked behind the shared 5 s penalty
     await advance(3000);
     await Promise.all([parked, sibling]);
     expect(hotCalls).toBe(3);
