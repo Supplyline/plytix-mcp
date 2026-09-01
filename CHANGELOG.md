@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-09-01
+
+### Fixed
+- 429 handling was dead code against the real API: Plytix sends no `x-ratelimit-*` headers, so
+  both clients retried a rate-limited request instantly (stdio: once; Worker: effectively never
+  backed off). Both now share `src/rate-limit.ts`: a per-client token bucket (40 req / 10 s by
+  default, re-tuned to 80 % of the tightest window advertised in the auth JWT), body-aware
+  backoff (1–2 s → 8–9 s, `ttl` / `Retry-After` as a floor, 3 retries), a shared penalty so one
+  429 parks every in-flight worker, and fail-fast when the server asks for a wait over 15 s.
+- 5xx responses are retried for reads (`GET`, `POST …/search`) but never for mutations.
+- The auth mint itself is retried on 429/5xx.
+- Batch update: a guard read that fails at the transport level is now `stage: "read"` instead
+  of `stage: "conflict"`, so a 429 can no longer be mistaken for drift.
+
+### Changed
+- `PlytixClientConfig.rateLimit` / `WorkerClientConfig.rateLimit` and the stdio env override
+  `PLYTIX_RATE_LIMIT="limit/seconds"` set explicit pacing (explicit wins over the JWT).
+- `PlytixClient.getRateLimits()` / `WorkerPlytixClient.getRateLimits()` expose the account
+  windows read from the JWT.
+- `PlytixError.rateLimitInfo` (always `undefined`) is replaced by `rateLimit?: RateLimitHit`.
+- Batch runners: default inter-request delay 250 → 500 ms (a guarded row is two requests);
+  row-level retries use the shared schedule with 3 attempts.
+- Retries are logged as JSON lines: stdio → stderr, Worker → `console.warn`.
+
 ## [0.3.3] - 2026-06-09
 
 ### Changed

@@ -175,6 +175,10 @@ Optional:
 - v2 search: max 50 attributes
 - v1 search: max 20 attributes
 
+**Rate limits:** 50 req / 10 s and 5,000 req / h per account, advertised only in the auth JWT
+(`user_claims.account.rate_limit`); no `x-ratelimit-*` headers. See
+`docs/solutions/api-quirks/plytix-api.md` §16a.
+
 ## Inheritance Tracking
 
 Products return `overwritten_attributes` array listing attributes explicitly set (not inherited from family). If an attribute is NOT in this array, its value comes from family inheritance.
@@ -189,7 +193,8 @@ Related fields:
 
 - MCP server communicates via stdio (StdioServerTransport)
 - `PlytixClient` handles authentication with automatic token refresh
-- Rate limit detection with backoff on 429 responses
+- Rate limiting: token-bucket pacing (40 req / 10 s default, learned from the auth JWT) plus
+  body-aware 429/5xx backoff in `src/rate-limit.ts`; stdio logs retries to stderr as JSON
 - Each tool file exports a `register*Tools(server, client)` function
 - Tools are registered in `index.ts`
 

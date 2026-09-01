@@ -23,13 +23,22 @@ import type {
   PlytixAttributeDetail,
   PlytixFilterDefinition,
   PlytixRelationshipDefinition,
-  RateLimitInfo,
+  RateLimitConfig,
+  RateLimitWindow,
   BatchUpdateMetadata,
   BatchUpdateResult,
   ProductBatchExportInput,
   ProductBatchExportResult,
 } from './types.js';
 import { PlytixError } from './types.js';
+import {
+  DEFAULT_RATE_LIMIT,
+  TokenBucket,
+  decodeJwtRateLimits,
+  fetchWithRetry,
+  rateLimitConfigFromWindows,
+  type RetryLogger,
+} from './rate-limit.js';
 import {
   WORKER_INLINE_MAX_ITEMS,
   type BatchValidationOptions,
@@ -84,11 +93,21 @@ export interface WorkerClientConfig {
   baseUrl?: string;
   authUrl?: string;
   timeoutMs?: number;
+  /** Explicit pacing override; when set, the JWT-advertised limits are not applied. */
+  rateLimit?: RateLimitConfig;
 }
+
+// Surfaces in `wrangler tail`; there is no structured logger on the Worker yet.
+const logRetry: RetryLogger = (event, context) =>
+  console.warn(JSON.stringify({ event, ...context }));
 
 export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
-  private config: Required<PlytixClientConfig>;
+  private config: Required<Omit<PlytixClientConfig, 'rateLimit'>>;
+  /** Per-instance (so per-request) pacing: stops one MCP call from self-tripping the window. */
+  private readonly bucket: TokenBucket;
+  private readonly explicitRateLimit: boolean;
+  private rateLimits?: RateLimitWindow[];
   private attributeCache?: Map<string, PlytixAttributeDetail>;
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
   private cacheKeyPromise?: Promise<string>;
@@ -105,6 +124,24 @@ export class WorkerPlytixClient {
       authUrl: config.authUrl ?? DEFAULT_CONFIG.authUrl,
       timeoutMs: config.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
     };
+
+    this.explicitRateLimit = config.rateLimit !== undefined;
+    const { limit, windowMs } = config.rateLimit ?? DEFAULT_RATE_LIMIT;
+    this.bucket = new TokenBucket(limit, windowMs);
+  }
+
+  /** Account windows advertised in the auth JWT (known after the first request). */
+  getRateLimits(): RateLimitWindow[] | undefined {
+    return this.rateLimits;
+  }
+
+  private applyAdvertisedRateLimits(jwt: string): void {
+    const windows = decodeJwtRateLimits(jwt);
+    if (!windows) return;
+    this.rateLimits = windows;
+    if (this.explicitRateLimit) return;
+    const derived = rateLimitConfigFromWindows(windows);
+    if (derived) this.bucket.reconfigure(derived);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -132,6 +169,7 @@ export class WorkerPlytixClient {
     const cached = tokenCache.get(cacheKey);
     if (cached && now < cached.exp - 60_000) {
       this.token = cached;
+      this.applyAdvertisedRateLimits(cached.value);
       return cached.value;
     }
 
@@ -150,83 +188,60 @@ export class WorkerPlytixClient {
   }
 
   private async fetchToken(cacheKey: string): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
+    let response: Response;
     try {
-      const response = await fetch(this.config.authUrl, {
+      // Auth lives on a different host with its own limiter: retried on 429/5xx (the mint is
+      // idempotent) but not counted against our bucket.
+      response = await fetchWithRetry({
+        url: this.config.authUrl,
+        init: {
+          method: 'POST',
+          body: JSON.stringify({
+            api_key: this.config.apiKey,
+            api_password: this.config.apiPassword,
+          }),
+        },
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          api_key: this.config.apiKey,
-          api_password: this.config.apiPassword,
-        }),
-        signal: controller.signal,
+        path: '/auth/api/get-token',
+        bucket: this.bucket,
+        timeoutMs: this.config.timeoutMs,
+        log: logRetry,
+        countsAgainstBucket: false,
+        retryServerErrors: true,
       });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Authentication failed: ${response.status} - ${body}`,
-          response.status,
-          body
-        );
-      }
-
-      const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
-      const tokenData = result.data?.[0];
-
-      if (!tokenData?.access_token) {
-        throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
-      }
-
-      // Default to 15 minutes if expires_in not provided
-      const expiresIn = (tokenData.expires_in ?? 900) * 1000;
-      this.token = {
-        value: tokenData.access_token,
-        exp: Date.now() + expiresIn,
-      };
-
-      // Persist to module-level cache, keyed by the credential-pair digest.
-      tokenCache.set(cacheKey, this.token);
-
-      return this.token.value;
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Auth request failed: ${error}`, undefined, error);
     }
-  }
 
-  // ─────────────────────────────────────────────────────────────
-  // Rate Limiting
-  // ─────────────────────────────────────────────────────────────
-
-  private parseRateLimitHeaders(headers: Headers): RateLimitInfo | undefined {
-    const limit = headers.get('x-ratelimit-limit');
-    const remaining = headers.get('x-ratelimit-remaining');
-    const reset = headers.get('x-ratelimit-reset');
-
-    if (limit && remaining && reset) {
-      return {
-        limit: parseInt(limit, 10),
-        remaining: parseInt(remaining, 10),
-        reset: parseInt(reset, 10),
-      };
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(
+        `Authentication failed: ${response.status} - ${body}`,
+        response.status,
+        body
+      );
     }
-    return undefined;
-  }
 
-  private async backoffOnRateLimit(rateLimitInfo?: RateLimitInfo): Promise<void> {
-    if (!rateLimitInfo || rateLimitInfo.remaining > 0) return;
+    const result = (await response.json()) as PlytixResult<PlytixAuthResponse>;
+    const tokenData = result.data?.[0];
 
-    const now = Date.now();
-    const resetTime = rateLimitInfo.reset * 1000; // Convert to milliseconds
-    const delay = Math.max(1000, resetTime - now + 100); // Add small buffer
+    if (!tokenData?.access_token) {
+      throw new PlytixError('Invalid auth response: missing access_token', undefined, result);
+    }
 
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    // Default to 15 minutes if expires_in not provided
+    const expiresIn = (tokenData.expires_in ?? 900) * 1000;
+    this.token = {
+      value: tokenData.access_token,
+      exp: Date.now() + expiresIn,
+    };
+
+    // Persist to module-level cache, keyed by the credential-pair digest.
+    tokenCache.set(cacheKey, this.token);
+    this.applyAdvertisedRateLimits(tokenData.access_token);
+
+    return this.token.value;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -235,66 +250,45 @@ export class WorkerPlytixClient {
 
   private async request<T = unknown>(
     endpoint: string,
-    options: RequestInit = {},
-    retries = 1
+    options: RequestInit = {}
   ): Promise<PlytixResult<T>> {
-    const token = await this.getToken();
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-
     // Ensure no trailing slash (causes redirect that drops Authorization header)
     const url = `${this.config.baseUrl}${endpoint}`.replace(/\/+$/, '');
+    const method = (options.method ?? 'GET').toUpperCase();
 
+    let response: Response;
     try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...options.headers,
+      response = await fetchWithRetry({
+        url,
+        init: options,
+        method,
+        path: endpoint,
+        bucket: this.bucket,
+        timeoutMs: this.config.timeoutMs,
+        log: logRetry,
+        getToken: () => this.getToken(),
+        onUnauthorized: async () => {
+          // Token expired - clear both caches so the next attempt re-mints
+          tokenCache.delete(await this.getCacheKey());
+          this.token = undefined;
         },
-        signal: controller.signal,
       });
-
-      clearTimeout(timeout);
-
-      const rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-
-      // Rate limited - backoff and retry
-      if (response.status === 429 && retries > 0) {
-        await this.backoffOnRateLimit(rateLimitInfo);
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Token expired - clear both caches and retry
-      if (response.status === 401 && retries > 0) {
-        tokenCache.delete(await this.getCacheKey());
-        this.token = undefined;
-        return this.request(endpoint, options, retries - 1);
-      }
-
-      // Handle 204 No Content
-      if (response.status === 204) {
-        return { data: [] } as PlytixResult<T>;
-      }
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new PlytixError(
-          `Request failed: ${response.status} - ${body}`,
-          response.status,
-          body,
-          rateLimitInfo
-        );
-      }
-
-      return (await response.json()) as PlytixResult<T>;
     } catch (error) {
-      clearTimeout(timeout);
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Request failed: ${error}`, undefined, error);
     }
+
+    // Handle 204 No Content
+    if (response.status === 204) {
+      return { data: [] } as PlytixResult<T>;
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new PlytixError(`Request failed: ${response.status} - ${body}`, response.status, body);
+    }
+
+    return (await response.json()) as PlytixResult<T>;
   }
 
   // ─────────────────────────────────────────────────────────────
