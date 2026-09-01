@@ -15,13 +15,17 @@ const RATE_LIMITED = { message: 'API rate limit exceeded', limit: 50, window_siz
 // Fake timers, but leave setImmediate real so crypto.subtle (credential digest, row hashes)
 // can complete between steps — otherwise real I/O and fake sleeps deadlock each other.
 const FAKE = { toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const };
+// Captured before any test fakes timers: the yield below must be *real* wall-clock time,
+// because crypto.subtle completes on the libuv threadpool — event-loop ticks alone don't
+// guarantee it has finished on a cold CI runner.
+const realSetTimeout = globalThis.setTimeout;
+const yieldRealTime = (ms = 1) => new Promise<void>((resolve) => realSetTimeout(resolve, ms));
 async function advance(ms: number, step = 250): Promise<void> {
   let elapsed = 0;
   do {
     const chunk = Math.min(step, ms - elapsed);
     await vi.advanceTimersByTimeAsync(chunk);
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    await yieldRealTime();
     elapsed += chunk;
   } while (elapsed < ms);
 }
@@ -30,8 +34,8 @@ async function advance(ms: number, step = 250): Promise<void> {
  * on the real event loop, so how many pumps a request needs before its first fetch depends on
  * the Node version — never assert on fetch counts before settling on it.
  */
-async function settle(ready: () => boolean, maxPumps = 200): Promise<void> {
-  for (let i = 0; i < maxPumps && !ready(); i++) await advance(0);
+async function settle(ready: () => boolean, maxPumps = 2000): Promise<void> {
+  for (let i = 0; i < maxPumps && !ready(); i++) await advance(0); // ≤ ~2 s real time
   expect(ready()).toBe(true);
 }
 
@@ -127,6 +131,7 @@ describe('WorkerPlytixClient rate limiting', () => {
 
     const client = makeClient();
     const pending = client.searchProducts({}).catch((e: unknown) => e);
+    await settle(() => productCalls === 1);
     await advance(30_000);
     const error = (await pending) as PlytixError;
     expect(error).toBeInstanceOf(PlytixError);
@@ -168,12 +173,13 @@ describe('WorkerPlytixClient rate limiting', () => {
 
     const client = makeClient();
     const search = client.searchProducts({});
+    await settle(() => searchCalls === 1);
     await advance(5000);
     await search;
     expect(searchCalls).toBe(2);
 
     const patch = client.updateProduct('p1', { label: 'x' }).catch((e: unknown) => e);
-    await advance(30_000);
+    await settle(() => patchCalls === 1);
     expect(await patch).toMatchObject({ status: 502 });
     expect(patchCalls).toBe(1);
   });

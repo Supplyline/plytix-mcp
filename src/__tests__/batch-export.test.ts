@@ -362,13 +362,17 @@ describe('inline byte cap', () => {
 // Fake timers, but leave setImmediate real so crypto.subtle (credential digest, row hashes)
 // can complete between steps — otherwise real I/O and fake sleeps deadlock each other.
 const FAKE = { toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] as const };
+// Captured before any test fakes timers: the yield below must be *real* wall-clock time,
+// because crypto.subtle completes on the libuv threadpool — event-loop ticks alone don't
+// guarantee it has finished on a cold CI runner.
+const realSetTimeout = globalThis.setTimeout;
+const yieldRealTime = (ms = 1) => new Promise<void>((resolve) => realSetTimeout(resolve, ms));
 async function advance(ms: number, step = 250): Promise<void> {
   let elapsed = 0;
   do {
     const chunk = Math.min(step, ms - elapsed);
     await vi.advanceTimersByTimeAsync(chunk);
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    await yieldRealTime();
     elapsed += chunk;
   } while (elapsed < ms);
 }
