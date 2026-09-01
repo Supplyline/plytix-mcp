@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `filter_type` (search and the per-id GET disagree — see
   `docs/solutions/api-quirks/plytix-api.md` §14). No tool surfaced either.
 
+### Fixed
+- An option-typed attribute (`DropdownAttribute` / `MultiSelectAttribute`) that arrives without
+  its `options` is now backfilled by a per-id GET before the cache is committed.
+  `validateAttributeValue` reads "no options" as "no constraint", so an optionless dropdown in
+  the cache would silently disable allowed-value checking on `products_set_attribute`. Live,
+  all 42 option-typed attributes carry their options, so this fetches nothing in practice.
+- The attribute search now refuses to return a truncated catalogue: if the endpoint reports a
+  `count` higher than the rows collected before the `MAX_PAGES` cap, the build throws instead
+  of caching a partial map in which real attributes look nonexistent. It also stops on that
+  `count`, so a final page that is exactly full no longer costs an extra empty request.
+
 ## [0.3.4] - 2026-09-01
 
 ### Fixed

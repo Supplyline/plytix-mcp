@@ -184,7 +184,7 @@ function attrSearchRoute(rows: Array<Record<string, unknown>>, pageSize = 100): 
     const page = body.pagination?.page ?? 1;
     const size = body.pagination?.page_size ?? pageSize;
     const slice = rows.slice((page - 1) * size, page * size);
-    return json({ data: slice });
+    return json({ data: slice, pagination: { page, page_size: size, count: rows.length } });
   };
 }
 
@@ -303,6 +303,82 @@ describe('PlytixClient attribute cache', () => {
     const client = makeClient(UNPACED);
     expect(await client.getAttributeOptions('label_a1')).toEqual([]);
     expect(await client.getAttributeOptions('nope')).toBeNull();
+  });
+
+  it('stops on the reported count instead of probing one page past a full final page', async () => {
+    const rows = Array.from({ length: 200 }, (_, i) => attrRow(`a${i}`));
+    const { calls } = stubFetch(authRoute(), attrSearchRoute(rows));
+
+    const client = makeClient(UNPACED);
+    expect((await client.getAttributeByLabel('label_a199'))?.id).toBe('a199');
+    // 200 rows at page_size 100 is exactly two full pages — the third would come back empty.
+    expect(calls.filter((u) => u.includes('/attributes/product/search'))).toHaveLength(2);
+  });
+
+  it('refuses to cache a truncated catalogue', async () => {
+    // count says 6, but the endpoint only ever yields 2 rows per page and then dries up.
+    const rows = [attrRow('a1'), attrRow('a2')];
+    stubFetch(authRoute(), (url, init) => {
+      if (!url.includes('/api/v1/attributes/product/search')) return undefined;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        pagination?: { page?: number; page_size?: number };
+      };
+      const page = body.pagination?.page ?? 1;
+      return json({
+        data: page === 1 ? rows : [],
+        pagination: { page, page_size: 100, count: 6 },
+      });
+    });
+
+    const client = makeClient(UNPACED);
+    await expect(client.getAttributeByLabel('label_a1')).rejects.toThrow(
+      /truncated at 2\/6 attributes/
+    );
+  });
+
+  it('backfills options for an option-typed row that arrives without them', async () => {
+    // Plytix omits absent fields, so a dropdown *could* arrive optionless — which would make
+    // validateAttributeValue treat it as unconstrained. It must be fetched by id instead.
+    const perId: string[] = [];
+    const { calls } = stubFetch(
+      authRoute(),
+      attrSearchRoute([
+        attrRow('a1', { type_class: 'DropdownAttribute' }), // no options key
+        attrRow('a2', { type_class: 'MultiSelectAttribute', options: ['x'] }),
+        attrRow('a3'), // TextAttribute, legitimately optionless
+      ]),
+      (url) => {
+        const m = url.match(/\/api\/v1\/attributes\/product\/(a\d+)$/);
+        if (!m) return undefined;
+        perId.push(m[1]);
+        return json({ data: [{ id: m[1], label: `label_${m[1]}`, options: ['Full', 'Standard'] }] });
+      }
+    );
+
+    const client = makeClient(UNPACED);
+    expect(await client.getAttributeOptions('label_a1')).toEqual(['Full', 'Standard']);
+    expect(await client.getAttributeOptions('label_a2')).toEqual(['x']);
+    expect(await client.getAttributeOptions('label_a3')).toEqual([]);
+    // Only the optionless dropdown was fetched — not the complete row, not the text attribute.
+    expect(perId).toEqual(['a1']);
+    expect(perIdGets(calls)).toHaveLength(1);
+  });
+
+  it('keeps the cache usable when an options backfill fails', async () => {
+    stubFetch(
+      authRoute(),
+      attrSearchRoute([attrRow('a1', { type_class: 'DropdownAttribute' })]),
+      (url) =>
+        /\/api\/v1\/attributes\/product\/a1$/.test(url) ? json({ error: 'boom' }, 422) : undefined
+    );
+
+    const client = makeClient(UNPACED);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await client.getAttributeByLabel('label_a1'))?.label).toBe('label_a1');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('plytix.attribute_options_backfill_failed')
+    );
+    stderr.mockRestore();
   });
 
   it('throws PlytixError when the account has no attributes at all', async () => {

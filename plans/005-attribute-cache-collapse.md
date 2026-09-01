@@ -22,6 +22,23 @@ Two findings beyond the plan:
 Live result on the Supplyline account (215 attributes): **3 search calls, 0 per-id GETs,
 4.6 s cold** (was 216 requests / ~55 s), warm cache 0 requests.
 
+Two hardenings added after a Codex review round, both about the cache becoming load-bearing
+on search's field completeness:
+
+- **Options backfill.** `validateAttributeValue` treats an attribute with no options as
+  unconstrained, so an optionless dropdown row would silently disable allowed-value checking
+  on `products_set_attribute`. Option-typed rows missing `options` are now fetched by id
+  before the cache is committed — the plan's Path B, kept as a safety net for the anomaly.
+  Live: 0 of 42 option-typed attributes need it, so it costs nothing.
+- **Truncation refusal.** The `MAX_PAGES` cap previously truncated silently (pre-existing, but
+  the cache is now the only source for these rows). The build compares rows collected against
+  the `count` the endpoint reports and throws rather than caching a partial catalogue.
+
+Findings deliberately not acted on, as pre-existing and unchanged by this PR: the 20 %
+unlabelled-row tolerance (deliberate — a few bad rows shouldn't fail the build) and
+duplicate labels overwriting last-wins (labels are unique in Plytix; a duplicate is an API
+anomaly with no better resolution).
+
 ## Status
 
 - **Priority**: P3

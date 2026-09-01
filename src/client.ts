@@ -32,7 +32,7 @@ import type {
   ProductBatchExportResult,
   ProductBatchExportToFileInput,
 } from './types.js';
-import { ATTRIBUTE_CACHE_FIELDS, PlytixError } from './types.js';
+import { ATTRIBUTE_CACHE_FIELDS, OPTION_TYPE_CLASSES, PlytixError } from './types.js';
 import {
   DEFAULT_RATE_LIMIT,
   TokenBucket,
@@ -67,7 +67,7 @@ const DEFAULT_CONFIG = {
 };
 
 // stdout is the MCP transport — every diagnostic line must go to stderr.
-const logRetry: RetryLogger = (event, context) =>
+const logStructured: RetryLogger = (event, context) =>
   console.error(JSON.stringify({ event, ...context }));
 
 export class PlytixClient {
@@ -97,7 +97,7 @@ export class PlytixClient {
       config?.rateLimit ?? parseRateLimitSpec(process.env.PLYTIX_RATE_LIMIT);
     if (rateLimit && !isValidRateLimitConfig(rateLimit)) {
       // An unusable override must not silently pin the default *and* block the JWT.
-      logRetry('plytix.rate_limit_config_ignored', { rateLimit });
+      logStructured('plytix.rate_limit_config_ignored', { rateLimit });
       rateLimit = undefined;
     }
     this.explicitRateLimit = rateLimit !== undefined;
@@ -146,7 +146,7 @@ export class PlytixClient {
         path: '/auth/api/get-token',
         bucket: this.bucket,
         timeoutMs: this.config.timeoutMs,
-        log: logRetry,
+        log: logStructured,
         countsAgainstBucket: false,
         retryServerErrors: true,
       });
@@ -203,7 +203,7 @@ export class PlytixClient {
         path: endpoint,
         bucket: this.bucket,
         timeoutMs: this.config.timeoutMs,
-        log: logRetry,
+        log: logStructured,
         getToken: () => this.getToken(),
         onUnauthorized: () => {
           this.token = undefined;
@@ -471,6 +471,7 @@ export class PlytixClient {
     const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
     const rows: PlytixAttributeDetail[] = [];
     let page = 1;
+    let expected: number | undefined;
 
     while (page <= MAX_PAGES) {
       const result = await this.request<PlytixAttributeDetail>(
@@ -486,8 +487,21 @@ export class PlytixClient {
 
       if (!result.data || result.data.length === 0) break;
       rows.push(...result.data);
+      // `count` is how many attributes the search matched. Stopping on it also avoids the
+      // redundant empty request when the final page happens to be exactly full.
+      expected = result.pagination?.count ?? expected;
+      if (expected !== undefined && rows.length >= expected) break;
       if (result.data.length < pageSize) break;
       page++;
+    }
+
+    // Silently caching a partial catalogue would make real attributes look nonexistent for
+    // the life of the cache, so refuse it. Unchanged when the API reports no count.
+    if (expected !== undefined && rows.length < expected) {
+      throw new PlytixError(
+        `Attribute search truncated at ${rows.length}/${expected} attributes ` +
+          `(MAX_PAGES=${MAX_PAGES} at page_size ${pageSize})`
+      );
     }
 
     return rows;
@@ -556,8 +570,50 @@ export class PlytixClient {
       );
     }
 
+    await this.backfillMissingOptions(byLabel);
+
     this.attributeCache = { byLabel, expires: Date.now() + CACHE_TTL_MS };
     return byLabel;
+  }
+
+  /**
+   * Search omits empty or absent fields, so an option-typed attribute could in principle
+   * arrive without its `options`. That would be invisible but harmful: `validateAttributeValue`
+   * reads "no options" as "no constraint", so an invalid value would sail through to Plytix on
+   * `products_set_attribute`. Fetch those few by id instead.
+   *
+   * On a live 215-attribute account this fetches nothing — all 42 option-typed rows carry
+   * their options — so it costs a comparison per build in the normal case.
+   */
+  private async backfillMissingOptions(
+    byLabel: Map<string, PlytixAttributeDetail>
+  ): Promise<void> {
+    const incomplete = [...byLabel.values()].filter(
+      (attr) => OPTION_TYPE_CLASSES.has(attr.type_class) && attr.options === undefined
+    );
+    if (incomplete.length === 0) return;
+
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < incomplete.length; i += BATCH_SIZE) {
+      const batch = incomplete.slice(i, i + BATCH_SIZE);
+      const details = await Promise.allSettled(
+        batch.map((attr) => this.getAttributeById(attr.id))
+      );
+      details.forEach((result, index) => {
+        const attr = batch[index];
+        if (result.status === 'fulfilled' && result.value) {
+          byLabel.set(attr.label, { ...attr, options: result.value.options ?? [] });
+        } else {
+          // Leave the row as it came; the next build retries. Logged because a value written
+          // against this attribute in the meantime is not validated against its option list.
+          logStructured('plytix.attribute_options_backfill_failed', {
+            label: attr.label,
+            id: attr.id,
+            type_class: attr.type_class,
+          });
+        }
+      });
+    }
   }
 
   /**

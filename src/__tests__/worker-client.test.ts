@@ -294,21 +294,36 @@ describe('WorkerPlytixClient attribute cache', () => {
       ...(i === 0 ? { options: ['Full', 'Standard'] } : {}),
     }));
     let searchCalls = 0;
+    const requested: string[][] = [];
     const { calls } = stubFetch(authRoute(), (url, init) => {
       if (!url.includes('/api/v1/attributes/product/search')) return undefined;
       searchCalls++;
       const body = JSON.parse(String(init?.body ?? '{}')) as {
+        attributes?: string[];
         pagination?: { page?: number; page_size?: number };
       };
+      requested.push(body.attributes ?? []);
       const page = body.pagination?.page ?? 1;
       const size = body.pagination?.page_size ?? 100;
-      return json({ data: rows.slice((page - 1) * size, page * size) });
+      return json({
+        data: rows.slice((page - 1) * size, page * size),
+        pagination: { page, page_size: size, count: rows.length },
+      });
     });
 
     const client = makeClient(UNPACED);
     expect(await client.getAttributeOptions('label_a0')).toEqual(['Full', 'Standard']);
     expect((await client.getAttributeByLabel('label_a149'))?.name).toBe('Name a149');
     expect(searchCalls).toBe(2); // 150 rows at page_size 100
+    // The Worker must ask for the same field set as stdio, or options/description go missing.
+    expect(requested[0]).toEqual([
+      'label',
+      'name',
+      'type_class',
+      'options',
+      'groups',
+      'description',
+    ]);
     expect(
       calls.filter((u) => /\/api\/v1\/attributes\/product\/[^/?]+$/.test(u) && !u.includes('/search'))
     ).toHaveLength(0);

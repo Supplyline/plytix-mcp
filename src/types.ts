@@ -34,6 +34,9 @@ export interface PlytixPagination {
   page_size: number;
   total: number;
   pages: number;
+  /** v1 search: number of rows matching the query (`total_count` is the whole catalogue). */
+  count?: number;
+  total_count?: number;
 }
 
 export interface PlytixResult<T = unknown> {
@@ -412,6 +415,16 @@ export interface PlytixAttributeDetail {
  * type — `DropdownAttribute` — while the GET reports the underlying filter primitive —
  * `TextAttribute` — for that same attribute, so caching it would contradict `getAttributeById`).
  */
+/**
+ * Attribute types whose allowed values are constrained by `options`. `validateAttributeValue`
+ * treats an attribute with no options as unconstrained, so a row of one of these types that
+ * arrives without its options would silently disable validation on the write path.
+ */
+export const OPTION_TYPE_CLASSES: ReadonlySet<string> = new Set([
+  'DropdownAttribute',
+  'MultiSelectAttribute',
+]);
+
 export const ATTRIBUTE_CACHE_FIELDS = [
   'label',
   'name',
