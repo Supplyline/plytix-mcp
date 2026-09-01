@@ -125,6 +125,9 @@ rejected even if a slot just opened); Worker bucket entries carry an in-flight c
 eviction skips entries with live callers, so one account can never be split across two
 limiters.
 
+Round 5 — the pin (`inFlight++`) now happens inside `getBucketEntry(pin)` in the same
+synchronous span as the lookup/creation, closing the microtask window between lookup and pin.
+
 ## Current state (after #37)
 
 | | stdio `client.ts` | worker `worker-client.ts` |

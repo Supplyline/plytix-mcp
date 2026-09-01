@@ -145,15 +145,25 @@ export class WorkerPlytixClient {
     }
   }
 
-  /** Explicit override if configured, else the isolate-wide bucket for these credentials. */
-  private async getBucketEntry(): Promise<BucketEntry> {
-    if (this.bucketOverride) return this.bucketOverride;
+  /**
+   * Explicit override if configured, else the isolate-wide bucket for these credentials.
+   * With `pin`, the in-flight count is incremented in the same synchronous span as the
+   * lookup — an `await` between the two would leave a microtask in which another pair's
+   * eviction pass could drop a still-idle entry and split this account across two limiters.
+   */
+  private async getBucketEntry(pin = false): Promise<BucketEntry> {
+    if (this.bucketOverride) {
+      if (pin) this.bucketOverride.inFlight++;
+      return this.bucketOverride;
+    }
     const cacheKey = await this.getCacheKey();
+    // Everything below runs without yielding.
     const existing = bucketCache.get(cacheKey);
     if (existing) {
       // LRU touch: re-insert so eviction below prefers the least recently used pair.
       bucketCache.delete(cacheKey);
       bucketCache.set(cacheKey, existing);
+      if (pin) existing.inFlight++;
       return existing;
     }
     // Bound the map: a long-lived isolate serving many distinct credential pairs must not
@@ -167,15 +177,17 @@ export class WorkerPlytixClient {
         }
       }
     }
-    const created: BucketEntry = { bucket: new TokenBucket(DEFAULT_RATE_LIMIT), inFlight: 0 };
+    const created: BucketEntry = {
+      bucket: new TokenBucket(DEFAULT_RATE_LIMIT),
+      inFlight: pin ? 1 : 0,
+    };
     bucketCache.set(cacheKey, created);
     return created;
   }
 
   /** Run `fn` with the bucket pinned against eviction for its duration. */
   private async withBucket<T>(fn: (bucket: TokenBucket) => Promise<T>): Promise<T> {
-    const entry = await this.getBucketEntry();
-    entry.inFlight++;
+    const entry = await this.getBucketEntry(true);
     try {
       return await fn(entry.bucket);
     } finally {
