@@ -18,7 +18,7 @@ its STOP conditions, and update your row when done.
 | 005  | Collapse attribute-cache N+1 via search `attributes` param | P3 | S | 002 | TODO |
 | 006  | Dependency refresh (MCP SDK to 1.29.x, wrangler bump; zod stays v3) | P3 | S | — | TODO |
 | 007  | Post-ship fixes for the batch update/export implementation (review findings of 2026-06-10) | P1 | S–M | — | DONE (this session — see PR) |
-| 008  | Real 429 handling: body-aware backoff, client-level token bucket, limits learned from JWT (Plytix sends no rate-limit headers) | P1 | S–M | absorbs PR #37 | TODO |
+| 008  | Real 429 handling: body-aware backoff, client-level token bucket, limits learned from JWT (Plytix sends no rate-limit headers) | P1 | S–M | absorbs PR #37 (merged `81da7dd`) | IN REVIEW — PR #39 (223 tests; live: 215-attr cache build 0×429, 25-row dry run 0×429). Cross-repo doc flips (etl idiosyncrasies, shopware field guide §10) happen after merge |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale) | SUPERSEDED
 
