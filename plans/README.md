@@ -15,7 +15,7 @@ its STOP conditions, and update your row when done.
 | 002  | Port worker client hardening to stdio client + client unit tests + CI worker typecheck | P1 | S | — | DONE — PR #28 (rebased onto `fb8935e`, 87/87 tests) |
 | 003  | OAuth abuse hardening (rate limits, consent context, redirect validation, shorter TTL) | P2 | M | — | DONE (this session — see PR) |
 | 004  | Unify dual-surface core (shared client/lookup core, single tool registry) | P2 | L | 002 | TODO (scope grew: batch tools added ~4 more hand-mirrored definitions) |
-| 005  | Collapse attribute-cache N+1 via search `attributes` param | P3 | S | 002 | TODO |
+| 005  | Collapse attribute-cache N+1 via search `attributes` param | P3 | S | 002 | DONE — Path A (search returns `options`); 215 attrs = 3 requests / 4.6 s, was 216 / 55 s |
 | 006  | Dependency refresh (MCP SDK to 1.29.x, wrangler bump; zod stays v3) | P3 | S | — | TODO |
 | 007  | Post-ship fixes for the batch update/export implementation (review findings of 2026-06-10) | P1 | S–M | — | DONE (this session — see PR) |
 | 008  | Real 429 handling: body-aware backoff, client-level token bucket, limits learned from JWT (Plytix sends no rate-limit headers) | P1 | S–M | absorbs PR #37 (merged `81da7dd`) | DONE — PR #39 after 6 Codex review rounds (235 tests; live: 215-attr cache build 0×429, 25-row dry run 0×429) |

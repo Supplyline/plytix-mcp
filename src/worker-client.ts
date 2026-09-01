@@ -30,7 +30,7 @@ import type {
   ProductBatchExportInput,
   ProductBatchExportResult,
 } from './types.js';
-import { PlytixError } from './types.js';
+import { ATTRIBUTE_CACHE_FIELDS, OPTION_TYPE_CLASSES, PlytixError } from './types.js';
 import {
   DEFAULT_RATE_LIMIT,
   TokenBucket,
@@ -110,7 +110,7 @@ export interface WorkerClientConfig {
 }
 
 // Surfaces in `wrangler tail`; there is no structured logger on the Worker yet.
-const logRetry: RetryLogger = (event, context) =>
+const logStructured: RetryLogger = (event, context) =>
   console.warn(JSON.stringify({ event, ...context }));
 
 export class WorkerPlytixClient {
@@ -140,7 +140,7 @@ export class WorkerPlytixClient {
       if (isValidRateLimitConfig(config.rateLimit)) {
         this.bucketOverride = { bucket: new TokenBucket(config.rateLimit), inFlight: 0 };
       } else {
-        logRetry('plytix.rate_limit_config_ignored', { rateLimit: config.rateLimit });
+        logStructured('plytix.rate_limit_config_ignored', { rateLimit: config.rateLimit });
       }
     }
   }
@@ -276,7 +276,7 @@ export class WorkerPlytixClient {
           path: '/auth/api/get-token',
           bucket,
           timeoutMs: this.config.timeoutMs,
-          log: logRetry,
+          log: logStructured,
           countsAgainstBucket: false,
           retryServerErrors: true,
         })
@@ -338,7 +338,7 @@ export class WorkerPlytixClient {
           path: endpoint,
           bucket,
           timeoutMs: this.config.timeoutMs,
-          log: logRetry,
+          log: logStructured,
           getToken: () => this.getToken(),
           onUnauthorized: async () => {
             // Token expired - clear both caches so the next attempt re-mints
@@ -713,29 +713,58 @@ export class WorkerPlytixClient {
   /**
    * Paginate all attribute IDs from the v1 search endpoint.
    */
-  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+  /**
+   * Page through every product attribute, fully populated.
+   *
+   * Requesting the cache's field set up front means the whole catalogue arrives in
+   * ceil(N/100) requests. The previous walk fetched ids here and then one GET per id —
+   * 216 requests on a 215-attribute account, which reliably tripped the 50 req/10 s
+   * window and left the cache missing whatever 429'd.
+   */
+  async searchAttributeDetails(pageSize = 100): Promise<PlytixAttributeDetail[]> {
     const MAX_PAGES = 50; // Safety cap — 5,000 attributes max
-    const attrIds: string[] = [];
+    const rows: PlytixAttributeDetail[] = [];
     let page = 1;
+    let expected: number | undefined;
 
     while (page <= MAX_PAGES) {
-      const result = await this.request<{ id: string }>(
+      const result = await this.request<PlytixAttributeDetail>(
         '/api/v1/attributes/product/search',
         {
           method: 'POST',
           body: JSON.stringify({
+            attributes: ATTRIBUTE_CACHE_FIELDS,
             pagination: { page, page_size: pageSize },
           }),
         }
       );
 
       if (!result.data || result.data.length === 0) break;
-      attrIds.push(...result.data.map((a) => a.id));
+      rows.push(...result.data);
+      // `count` is how many attributes the search matched. Stopping on it also avoids the
+      // redundant empty request when the final page happens to be exactly full.
+      expected = result.pagination?.count ?? expected;
+      if (expected !== undefined && rows.length >= expected) break;
       if (result.data.length < pageSize) break;
       page++;
     }
 
-    return attrIds;
+    // Silently caching a partial catalogue would make real attributes look nonexistent for
+    // the life of the cache, so refuse it. Unchanged when the API reports no count.
+    if (expected !== undefined && rows.length < expected) {
+      throw new PlytixError(
+        `Attribute search truncated at ${rows.length}/${expected} attributes ` +
+          `(MAX_PAGES=${MAX_PAGES} at page_size ${pageSize})`
+      );
+    }
+
+    return rows;
+  }
+
+  /** Ids only. Prefer `searchAttributeDetails` — same request count, full rows. */
+  async searchAttributeIds(pageSize = 100): Promise<string[]> {
+    const rows = await this.searchAttributeDetails(pageSize);
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -766,44 +795,73 @@ export class WorkerPlytixClient {
   }
 
   private async doBuildAttributeCache(): Promise<Map<string, PlytixAttributeDetail>> {
-    const attrIds = await this.searchAttributeIds();
+    const rows = await this.searchAttributeDetails();
 
-    if (attrIds.length === 0) {
+    if (rows.length === 0) {
       throw new PlytixError(
         'Attribute cache build failed: no attributes found. Check API credentials and account configuration.'
       );
     }
 
-    // Fetch in batches to avoid overwhelming Plytix rate limits
-    const BATCH_SIZE = 10;
-    const allResults: PromiseSettledResult<PlytixAttributeDetail | null>[] = [];
-    for (let i = 0; i < attrIds.length; i += BATCH_SIZE) {
-      const batch = attrIds.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.allSettled(
-        batch.map((id) => this.getAttributeById(id))
-      );
-      allResults.push(...batchResults);
-    }
-
     const byLabel = new Map<string, PlytixAttributeDetail>();
-    let failures = 0;
-    for (const result of allResults) {
-      if (result.status === 'fulfilled' && result.value?.label) {
-        byLabel.set(result.value.label, result.value);
-      } else {
-        failures++;
-      }
+    let unusable = 0;
+    for (const row of rows) {
+      if (row?.label) byLabel.set(row.label, row);
+      else unusable++;
     }
 
-    // If >20% of fetches failed or returned empty, don't cache — surface the error
-    if (failures > attrIds.length * 0.2) {
+    // A label is what the cache is keyed by. If more than 20% of rows arrive without one
+    // the response shape is wrong; surface that instead of caching a cripple.
+    if (unusable > rows.length * 0.2) {
       throw new PlytixError(
-        `Attribute cache build failed: ${failures}/${attrIds.length} attribute fetches failed or returned empty`
+        `Attribute cache build failed: ${unusable}/${rows.length} attributes returned without a label`
       );
     }
+
+    await this.backfillMissingOptions(byLabel);
 
     this.attributeCache = byLabel;
     return byLabel;
+  }
+
+  /**
+   * Search omits empty or absent fields, so an option-typed attribute could in principle
+   * arrive without its `options`. That would be invisible but harmful: `validateAttributeValue`
+   * reads "no options" as "no constraint", so an invalid value would sail through to Plytix on
+   * `products_set_attribute`. Fetch those few by id instead.
+   *
+   * On a live 215-attribute account this fetches nothing — all 42 option-typed rows carry
+   * their options — so it costs a comparison per build in the normal case.
+   */
+  private async backfillMissingOptions(
+    byLabel: Map<string, PlytixAttributeDetail>
+  ): Promise<void> {
+    const incomplete = [...byLabel.values()].filter(
+      (attr) => OPTION_TYPE_CLASSES.has(attr.type_class) && attr.options === undefined
+    );
+    if (incomplete.length === 0) return;
+
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < incomplete.length; i += BATCH_SIZE) {
+      const batch = incomplete.slice(i, i + BATCH_SIZE);
+      const details = await Promise.allSettled(
+        batch.map((attr) => this.getAttributeById(attr.id))
+      );
+      details.forEach((result, index) => {
+        const attr = batch[index];
+        if (result.status === 'fulfilled' && result.value) {
+          byLabel.set(attr.label, { ...attr, options: result.value.options ?? [] });
+        } else {
+          // Leave the row as it came; the next build retries. Logged because a value written
+          // against this attribute in the meantime is not validated against its option list.
+          logStructured('plytix.attribute_options_backfill_failed', {
+            label: attr.label,
+            id: attr.id,
+            type_class: attr.type_class,
+          });
+        }
+      });
+    }
   }
 
   /**

@@ -34,6 +34,9 @@ export interface PlytixPagination {
   page_size: number;
   total: number;
   pages: number;
+  /** v1 search: number of rows matching the query (`total_count` is the whole catalogue). */
+  count?: number;
+  total_count?: number;
 }
 
 export interface PlytixResult<T = unknown> {
@@ -400,6 +403,36 @@ export interface PlytixAttributeDetail {
   created?: string;
   modified?: string;
 }
+
+/**
+ * Fields the attribute cache needs, sent as the `attributes` parameter of
+ * `POST /api/v1/attributes/product/search`. Plytix populates every one of them on search
+ * rows (verified live 2026-09-01, incl. `options` for dropdown/multiselect), which is what
+ * lets the cache build in ceil(N/100) requests instead of one GET per attribute.
+ *
+ * Two fields the per-id GET returns are deliberately absent, and no tool surfaces either:
+ * `created` (search never returns it) and `filter_type` (search reports the attribute's own
+ * type — `DropdownAttribute` — while the GET reports the underlying filter primitive —
+ * `TextAttribute` — for that same attribute, so caching it would contradict `getAttributeById`).
+ */
+/**
+ * Attribute types whose allowed values are constrained by `options`. `validateAttributeValue`
+ * treats an attribute with no options as unconstrained, so a row of one of these types that
+ * arrives without its options would silently disable validation on the write path.
+ */
+export const OPTION_TYPE_CLASSES: ReadonlySet<string> = new Set([
+  'DropdownAttribute',
+  'MultiSelectAttribute',
+]);
+
+export const ATTRIBUTE_CACHE_FIELDS = [
+  'label',
+  'name',
+  'type_class',
+  'options',
+  'groups',
+  'description',
+] as const;
 
 export interface PlytixFilterDefinition {
   key?: string;

@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-09-01
+
+### Changed
+- Attribute cache builds from paginated search rows instead of one GET per attribute
+  (Plan 005). Plytix returns `label`, `name`, `type_class`, `options`, `groups` and
+  `description` directly on `POST /api/v1/attributes/product/search` when they are requested,
+  so a 215-attribute account now costs **3 requests / ~4.6 s** instead of 216 requests / ~55 s
+  — measured live. `options` for dropdown/multiselect arrive on the search rows, so
+  `attributes_get_options` no longer needs a per-id fetch either.
+- New `searchAttributeDetails()` on both clients returns fully populated rows;
+  `searchAttributeIds()` is now a thin wrapper over it, and `getAttributeById()` is unchanged
+  and still available for callers that need the GET-only fields.
+- The cache's 20 % failure threshold now counts rows that arrive **without a label** (the key
+  the cache is built on) rather than failed per-id fetches; the error message changed to
+  `N/M attributes returned without a label`.
+- Two fields are deliberately not cached: `created` (search never returns it) and
+  `filter_type` (search and the per-id GET disagree — see
+  `docs/solutions/api-quirks/plytix-api.md` §14). No tool surfaced either.
+
+### Fixed
+- An option-typed attribute (`DropdownAttribute` / `MultiSelectAttribute`) that arrives without
+  its `options` is now backfilled by a per-id GET before the cache is committed.
+  `validateAttributeValue` reads "no options" as "no constraint", so an optionless dropdown in
+  the cache would silently disable allowed-value checking on `products_set_attribute`. Live,
+  all 42 option-typed attributes carry their options, so this fetches nothing in practice.
+- The attribute search now refuses to return a truncated catalogue: if the endpoint reports a
+  `count` higher than the rows collected before the `MAX_PAGES` cap, the build throws instead
+  of caching a partial map in which real attributes look nonexistent. It also stops on that
+  `count`, so a final page that is exactly full no longer costs an extra empty request.
+
 ## [0.3.4] - 2026-09-01
 
 ### Fixed
