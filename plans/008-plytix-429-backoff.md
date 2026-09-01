@@ -120,6 +120,11 @@ Round 3 — all round-2 items verified; two more fixed: the admission cap now co
 queue residence (time queued behind others + remaining wait), and the Worker `bucketCache`
 evicts least-recently-used rather than oldest-inserted so a hot bucket is never split.
 
+Round 4 — residence cap now checked *before* admission (a caller held past the cap is
+rejected even if a slot just opened); Worker bucket entries carry an in-flight count and
+eviction skips entries with live callers, so one account can never be split across two
+limiters.
+
 ## Current state (after #37)
 
 | | stdio `client.ts` | worker `worker-client.ts` |

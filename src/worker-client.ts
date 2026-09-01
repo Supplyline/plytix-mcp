@@ -70,7 +70,12 @@ const tokenCache = new Map<string, PlytixAuthToken>();
 // One pacer per credential pair per isolate. The Worker builds a client per HTTP request,
 // so a per-instance bucket would let N concurrent requests for the same account each burst
 // the full window and ignore each other's 429 penalties. Tokens are already shared this way.
-const bucketCache = new Map<string, TokenBucket>();
+interface BucketEntry {
+  bucket: TokenBucket;
+  /** Requests currently pacing against this bucket; never evicted while > 0. */
+  inFlight: number;
+}
+const bucketCache = new Map<string, BucketEntry>();
 const MAX_CACHED_BUCKETS = 64;
 
 // De-dupes concurrent token fetches for the same credentials so a cold isolate (or a
@@ -112,7 +117,7 @@ export class WorkerPlytixClient {
   private token?: PlytixAuthToken;
   private config: Required<Omit<PlytixClientConfig, 'rateLimit'>>;
   /** Set only when the caller passed an explicit `rateLimit`; otherwise pacing is shared per account. */
-  private readonly bucketOverride?: TokenBucket;
+  private readonly bucketOverride?: BucketEntry;
   private rateLimits?: RateLimitWindow[];
   private attributeCache?: Map<string, PlytixAttributeDetail>;
   private attributeCachePromise?: Promise<Map<string, PlytixAttributeDetail>>;
@@ -133,7 +138,7 @@ export class WorkerPlytixClient {
 
     if (config.rateLimit) {
       if (isValidRateLimitConfig(config.rateLimit)) {
-        this.bucketOverride = new TokenBucket(config.rateLimit);
+        this.bucketOverride = { bucket: new TokenBucket(config.rateLimit), inFlight: 0 };
       } else {
         logRetry('plytix.rate_limit_config_ignored', { rateLimit: config.rateLimit });
       }
@@ -141,28 +146,41 @@ export class WorkerPlytixClient {
   }
 
   /** Explicit override if configured, else the isolate-wide bucket for these credentials. */
-  private async getBucket(): Promise<TokenBucket> {
+  private async getBucketEntry(): Promise<BucketEntry> {
     if (this.bucketOverride) return this.bucketOverride;
     const cacheKey = await this.getCacheKey();
-    let bucket = bucketCache.get(cacheKey);
-    if (bucket) {
-      // LRU touch: re-insert so eviction below always removes the least recently used pair,
-      // never a bucket that live requests are pacing against.
+    const existing = bucketCache.get(cacheKey);
+    if (existing) {
+      // LRU touch: re-insert so eviction below prefers the least recently used pair.
       bucketCache.delete(cacheKey);
-      bucketCache.set(cacheKey, bucket);
-      return bucket;
+      bucketCache.set(cacheKey, existing);
+      return existing;
     }
-    if (!bucket) {
-      // Bound the map: a long-lived isolate serving many distinct credential pairs must not
-      // grow without limit. Least recently used goes first; losing it only forgets history.
-      if (bucketCache.size >= MAX_CACHED_BUCKETS) {
-        const oldest = bucketCache.keys().next().value;
-        if (oldest !== undefined) bucketCache.delete(oldest);
+    // Bound the map: a long-lived isolate serving many distinct credential pairs must not
+    // grow without limit. Evict the least recently used *idle* entry — a bucket with live
+    // callers is never dropped, or the same account would end up with two limiters.
+    if (bucketCache.size >= MAX_CACHED_BUCKETS) {
+      for (const [key, entry] of bucketCache) {
+        if (entry.inFlight === 0) {
+          bucketCache.delete(key);
+          break;
+        }
       }
-      bucket = new TokenBucket(DEFAULT_RATE_LIMIT);
-      bucketCache.set(cacheKey, bucket);
     }
-    return bucket;
+    const created: BucketEntry = { bucket: new TokenBucket(DEFAULT_RATE_LIMIT), inFlight: 0 };
+    bucketCache.set(cacheKey, created);
+    return created;
+  }
+
+  /** Run `fn` with the bucket pinned against eviction for its duration. */
+  private async withBucket<T>(fn: (bucket: TokenBucket) => Promise<T>): Promise<T> {
+    const entry = await this.getBucketEntry();
+    entry.inFlight++;
+    try {
+      return await fn(entry.bucket);
+    } finally {
+      entry.inFlight--;
+    }
   }
 
   /** Account windows advertised in the auth JWT (known after the first request). */
@@ -175,7 +193,7 @@ export class WorkerPlytixClient {
     if (!windows) return;
     this.rateLimits = windows;
     if (this.bucketOverride) return;
-    (await this.getBucket()).reconfigure(rateLimitConfigsFromWindows(windows));
+    (await this.getBucketEntry()).bucket.reconfigure(rateLimitConfigsFromWindows(windows));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -232,23 +250,25 @@ export class WorkerPlytixClient {
     try {
       // Auth lives on a different host with its own limiter: retried on 429/5xx (the mint is
       // idempotent) but not counted against our bucket.
-      response = await fetchWithRetry({
-        url: this.config.authUrl,
-        init: {
+      response = await this.withBucket((bucket) =>
+        fetchWithRetry({
+          url: this.config.authUrl,
+          init: {
+            method: 'POST',
+            body: JSON.stringify({
+              api_key: this.config.apiKey,
+              api_password: this.config.apiPassword,
+            }),
+          },
           method: 'POST',
-          body: JSON.stringify({
-            api_key: this.config.apiKey,
-            api_password: this.config.apiPassword,
-          }),
-        },
-        method: 'POST',
-        path: '/auth/api/get-token',
-        bucket: await this.getBucket(),
-        timeoutMs: this.config.timeoutMs,
-        log: logRetry,
-        countsAgainstBucket: false,
-        retryServerErrors: true,
-      });
+          path: '/auth/api/get-token',
+          bucket,
+          timeoutMs: this.config.timeoutMs,
+          log: logRetry,
+          countsAgainstBucket: false,
+          retryServerErrors: true,
+        })
+      );
     } catch (error) {
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Auth request failed: ${error}`, undefined, error);
@@ -298,21 +318,23 @@ export class WorkerPlytixClient {
 
     let response: Response;
     try {
-      response = await fetchWithRetry({
-        url,
-        init: options,
-        method,
-        path: endpoint,
-        bucket: await this.getBucket(),
-        timeoutMs: this.config.timeoutMs,
-        log: logRetry,
-        getToken: () => this.getToken(),
-        onUnauthorized: async () => {
-          // Token expired - clear both caches so the next attempt re-mints
-          tokenCache.delete(await this.getCacheKey());
-          this.token = undefined;
-        },
-      });
+      response = await this.withBucket((bucket) =>
+        fetchWithRetry({
+          url,
+          init: options,
+          method,
+          path: endpoint,
+          bucket,
+          timeoutMs: this.config.timeoutMs,
+          log: logRetry,
+          getToken: () => this.getToken(),
+          onUnauthorized: async () => {
+            // Token expired - clear both caches so the next attempt re-mints
+            tokenCache.delete(await this.getCacheKey());
+            this.token = undefined;
+          },
+        })
+      );
     } catch (error) {
       if (error instanceof PlytixError) throw error;
       throw new PlytixError(`Request failed: ${error}`, undefined, error);

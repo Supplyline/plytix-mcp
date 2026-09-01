@@ -219,6 +219,41 @@ describe('WorkerPlytixClient rate limiting', () => {
     expect(calls.filter(productUrl)).toHaveLength(2);
   });
 
+  it('never evicts a bucket that a live request is pacing against', async () => {
+    vi.useFakeTimers(FAKE);
+    let hotCalls = 0;
+    const hotKey = `hot-key-${Date.now()}`;
+    stubFetch(authRoute(), (url, init) => {
+      if (!productUrl(url)) return undefined;
+      const body = String(init?.body ?? '');
+      if (body.includes('"hot"')) {
+        hotCalls++;
+        return hotCalls === 1 ? json({ limit: 50, window_size: 10, ttl: 5000 }, 429) : json({ data: [] });
+      }
+      return json({ data: [] });
+    });
+    const hot = (n: number) =>
+      new WorkerPlytixClient({ apiKey: hotKey, apiPassword: `p${n}`, baseUrl: BASE_URL, authUrl: AUTH_URL });
+
+    // The hot account's request is parked on a 5 s penalty…
+    const parked = hot(1).searchProducts({ attributes: ['hot'] });
+    await advance(100);
+    expect(hotCalls).toBe(1);
+
+    // …while 70 other credential pairs churn through the isolate (cache bound is 64).
+    for (let i = 0; i < 70; i++) {
+      await makeClient().searchProducts({});
+    }
+
+    // A second instance for the hot account must land on the SAME bucket and wait out the penalty.
+    const sibling = hot(1).searchProducts({ attributes: ['hot'] });
+    await advance(3000);
+    expect(hotCalls).toBe(1);
+    await advance(3000);
+    await Promise.all([parked, sibling]);
+    expect(hotCalls).toBe(3);
+  });
+
   it('explicit rateLimit config wins over the JWT', async () => {
     vi.useFakeTimers(FAKE);
     let productCalls = 0;

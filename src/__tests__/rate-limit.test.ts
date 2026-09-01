@@ -281,6 +281,18 @@ describe('TokenBucket', () => {
     expect((error as PlytixError).rateLimit?.retryAfterMs).toBe(20_000);
   });
 
+  it('a free slot does not bypass the residence cap once a caller has been held too long', async () => {
+    // Clock is controlled: enqueue at t=0, then pretend the FIFO turn arrives 31 s later.
+    let now = 0;
+    const bucket = new TokenBucket({ limit: 40, windowMs: 10_000 }, () => now, async () => undefined);
+    const gate = bucket.take(); // holds the chain… (resolves immediately, but the next turn
+    await gate; //             is what we manipulate)
+    const turn = bucket.take(); // enqueuedAt = 0
+    now = MAX_ADMISSION_WAIT_MS + 1000; // the turn is evaluated after a 31 s residence
+    await expect(turn).rejects.toBeInstanceOf(PlytixError);
+    await bucket.take(); // and the chain still advances
+  });
+
   it('waitForPenalty honors a penalty extended while sleeping', async () => {
     const { bucket, sleeps } = makeBucket(40, 10_000);
     bucket.penalize(1000);

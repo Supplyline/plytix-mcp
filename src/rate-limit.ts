@@ -273,20 +273,21 @@ export class TokenBucket {
           wait = Math.max(wait, inWindow[0] + window.windowMs - now);
         }
       }
-      if (wait <= 0) {
-        this.stamps.push(now);
-        return;
-      }
       // Total residence (already queued + still to wait), not just this sleep: under
-      // contention the FIFO turn itself can arrive long after the caller asked.
-      if (now - enqueuedAt + wait > MAX_ADMISSION_WAIT_MS) {
+      // contention the FIFO turn itself can arrive long after the caller asked. Checked
+      // before admission so the cap is a true bound on how long a caller can be held.
+      if (now - enqueuedAt + Math.max(0, wait) > MAX_ADMISSION_WAIT_MS) {
         const seconds = Math.ceil(wait / 1000);
         throw new PlytixError(
           `429 rate limit window exhausted locally: next slot in ${seconds}s (cap ${MAX_ADMISSION_WAIT_MS / 1000}s); retry later`,
           429,
           undefined,
-          { retryAfterMs: wait }
+          { retryAfterMs: Math.max(0, wait) }
         );
+      }
+      if (wait <= 0) {
+        this.stamps.push(now);
+        return;
       }
       await this.sleep(wait);
     }
