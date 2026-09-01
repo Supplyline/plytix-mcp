@@ -38,6 +38,7 @@ import {
   TokenBucket,
   decodeJwtRateLimits,
   fetchWithRetry,
+  isValidRateLimitConfig,
   parseRateLimitSpec,
   rateLimitConfigsFromWindows,
   type RetryLogger,
@@ -92,8 +93,13 @@ export class PlytixClient {
       throw new Error('Missing PLYTIX_API_KEY or PLYTIX_API_PASSWORD');
     }
 
-    const rateLimit: RateLimitConfig | undefined =
+    let rateLimit: RateLimitConfig | undefined =
       config?.rateLimit ?? parseRateLimitSpec(process.env.PLYTIX_RATE_LIMIT);
+    if (rateLimit && !isValidRateLimitConfig(rateLimit)) {
+      // An unusable override must not silently pin the default *and* block the JWT.
+      logRetry('plytix.rate_limit_config_ignored', { rateLimit });
+      rateLimit = undefined;
+    }
     this.explicitRateLimit = rateLimit !== undefined;
     this.bucket = new TokenBucket(rateLimit ?? DEFAULT_RATE_LIMIT);
   }

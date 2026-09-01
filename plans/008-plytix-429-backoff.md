@@ -106,6 +106,16 @@ Codex adversarial review, round 1 (2026-09-01, on PR #39) — fixed in the same 
   admission; 401 body not drained; 429/5xx body read outside the attempt timeout; `youch-core`
   lockfile slip; docs claimed an unreachable 8–9 s step and "3 attempts".
 
+Round 2 (same day) — verified C1–C4, C6 resolved; new: admission waits are now capped at
+30 s (`MAX_ADMISSION_WAIT_MS`) and fail with a 429-shaped error carrying `retryAfterMs`, so
+the hourly window can't turn a tool call into a multi-minute hang or outlive the token; the
+token is re-read after admission; bucket history is one shared stamp list so `reconfigure`
+never forgets a burst; `waitForPenalty` re-checks after sleeping; an invalid explicit
+`rateLimit` is ignored (logged) instead of pinning the default and blocking the JWT; the
+Worker's `bucketCache` is bounded (64). Declined: "youch-core still in lockfile" (it is a
+pre-existing dev transitive — only the accidental version edit was ours, and it is reverted);
+"callers admitted before the first 429 aren't parked" (inherent to in-flight requests).
+
 ## Current state (after #37)
 
 | | stdio `client.ts` | worker `worker-client.ts` |
@@ -162,7 +172,7 @@ export class TokenBucket {                                                      
 ```
 
 - `backoffDelayMs`: `max(retryAfterMs ?? 0, 1000 · 2^attempt) + rand() · 1000`; **returns
-  `null` when that exceeds 15 000 ms** (L3). Schedule ≈ 1–2 s, 2–3 s, 4–5 s, 8–9 s.
+  `null` when that exceeds 15 000 ms** (L3). Schedule ≈ 1–2 s, 2–3 s, 4–5 s (three retries; a fourth step would be 8–9 s but is never reached).
 - `parseRateLimitBody`: JSON → `limit`, `window_size`, `ttl` (ms → `retryAfterMs`); else regex
   `retry after (\d+) (milliseconds?|seconds?)`; else `undefined`.
 - `decodeJwtRateLimits`: split on `.`, base64url→base64 + pad, `atob`, JSON, read

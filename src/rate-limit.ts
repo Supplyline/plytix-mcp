@@ -29,6 +29,12 @@ export const RATE_LIMIT_SHARE = 0.8;
 export const MAX_BACKOFF_MS = 15_000;
 /** Retries on 429 / retryable 5xx, per request. */
 export const MAX_RATE_RETRIES = 3;
+/**
+ * Longest we will sit in the bucket queue for one request. The hourly window can demand
+ * waits of many minutes; inside a tool call that reads as a hang and outlives the token,
+ * so past this we fail fast with the time-to-next-slot instead (see plan 008 STOP rules).
+ */
+export const MAX_ADMISSION_WAIT_MS = 30_000;
 
 export type RetryLogger = (event: string, context: Record<string, unknown>) => void;
 
@@ -191,7 +197,9 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  * account window is blown for all in-flight workers, not just the one that saw it.
  */
 export class TokenBucket {
-  private windows: Array<{ limit: number; windowMs: number; stamps: number[] }> = [];
+  /** Every admission, newest last. One history serves all windows so reconfiguring never forgets a burst. */
+  private stamps: number[] = [];
+  private windows: RateLimitConfig[] = [];
   private penaltyUntil = 0;
   private queue: Promise<void> = Promise.resolve();
 
@@ -205,15 +213,18 @@ export class TokenBucket {
 
   /** The tightest window (for logs/tests); see `configs` for all of them. */
   get config(): RateLimitConfig {
-    const { limit, windowMs } = this.windows[0];
-    return { limit, windowMs };
+    return { ...this.windows[0] };
   }
 
   get configs(): RateLimitConfig[] {
-    return this.windows.map(({ limit, windowMs }) => ({ limit, windowMs }));
+    return this.windows.map((w) => ({ ...w }));
   }
 
-  /** Resolves when every window has a free slot and no penalty is active. */
+  /**
+   * Resolves when every window has a free slot and no penalty is active. Rejects with a
+   * 429-shaped PlytixError (carrying `retryAfterMs`) when the wait would exceed
+   * MAX_ADMISSION_WAIT_MS — the caller should surface that, not sit on it.
+   */
   take(): Promise<void> {
     const turn = this.queue.then(() => this.acquire());
     this.queue = turn.catch(() => undefined);
@@ -227,46 +238,52 @@ export class TokenBucket {
 
   /** For requests that don't count against the bucket (auth) but shouldn't fire into a blown window. */
   async waitForPenalty(): Promise<void> {
-    const wait = this.penaltyUntil - this.now();
-    if (wait > 0) await this.sleep(wait);
+    for (;;) {
+      const wait = this.penaltyUntil - this.now();
+      if (wait <= 0) return;
+      await this.sleep(wait); // re-check: the penalty may have been extended while we slept
+    }
   }
 
   /**
    * Replace the windows. Invalid entries are dropped; if nothing valid remains the current
    * configuration (or the default, on construction) is kept — a bad JWT must never turn
-   * pacing off or spin it forever.
+   * pacing off or spin it forever. Admission history is kept regardless.
    */
   reconfigure(config: RateLimitConfig | RateLimitConfig[]): void {
     const valid = (Array.isArray(config) ? config : [config])
       .filter(isValidRateLimitConfig)
+      .map((w) => ({ limit: w.limit, windowMs: w.windowMs }))
       .sort((a, b) => a.windowMs - b.windowMs);
-    if (valid.length === 0) {
-      if (this.windows.length === 0) {
-        this.windows = [{ ...DEFAULT_RATE_LIMIT, stamps: [] }];
-      }
-      return;
-    }
-    // Keep the history of any window we already track so a reconfigure can't reset a burst.
-    this.windows = valid.map(({ limit, windowMs }) => ({
-      limit,
-      windowMs,
-      stamps: this.windows.find((w) => w.windowMs === windowMs)?.stamps ?? [],
-    }));
+    if (valid.length > 0) this.windows = valid;
+    else if (this.windows.length === 0) this.windows = [{ ...DEFAULT_RATE_LIMIT }];
   }
 
   private async acquire(): Promise<void> {
     for (;;) {
       const now = this.now();
+      const horizon = this.windows[this.windows.length - 1].windowMs;
+      this.stamps = this.stamps.filter((stamp) => stamp + horizon > now);
+
       let wait = this.penaltyUntil - now;
       for (const window of this.windows) {
-        window.stamps = window.stamps.filter((stamp) => stamp + window.windowMs > now);
-        if (window.stamps.length >= window.limit) {
-          wait = Math.max(wait, window.stamps[0] + window.windowMs - now);
+        const inWindow = this.stamps.filter((stamp) => stamp + window.windowMs > now);
+        if (inWindow.length >= window.limit) {
+          wait = Math.max(wait, inWindow[0] + window.windowMs - now);
         }
       }
       if (wait <= 0) {
-        for (const window of this.windows) window.stamps.push(now);
+        this.stamps.push(now);
         return;
+      }
+      if (wait > MAX_ADMISSION_WAIT_MS) {
+        const seconds = Math.ceil(wait / 1000);
+        throw new PlytixError(
+          `429 rate limit window exhausted locally: next slot in ${seconds}s (cap ${MAX_ADMISSION_WAIT_MS / 1000}s); retry later`,
+          429,
+          undefined,
+          { retryAfterMs: wait }
+        );
       }
       await this.sleep(wait);
     }
@@ -316,14 +333,20 @@ export async function fetchWithRetry(options: RetryingFetchOptions): Promise<Res
   let rateRetries = 0;
 
   for (;;) {
-    // Token first: minting may reconfigure the bucket from the JWT, and the mint is what
-    // tells us the account's real windows — admit against those, not the cold default.
-    const headers = new Headers(options.init.headers);
-    if (options.getToken) headers.set('Authorization', `Bearer ${await options.getToken()}`);
-    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    // Token first so the mint can reconfigure the bucket from the JWT — admission then
+    // happens against the account's real windows, not the cold default. If we actually
+    // queued, re-read the token afterwards in case it aged out while we waited.
+    let token = options.getToken ? await options.getToken() : undefined;
+    const queuedAt = now();
 
     if (countsAgainstBucket) await options.bucket.take();
     else await options.bucket.waitForPenalty();
+
+    if (options.getToken && now() > queuedAt) token = await options.getToken();
+
+    const headers = new Headers(options.init.headers);
+    if (token !== undefined) headers.set('Authorization', `Bearer ${token}`);
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -336,9 +359,12 @@ export async function fetchWithRetry(options: RetryingFetchOptions): Promise<Res
     }
 
     if (response.status === 401 && options.getToken && authRetries < 1) {
-      clearTimeout(timeout);
       authRetries++;
-      await response.arrayBuffer().catch(() => undefined); // release the connection
+      try {
+        await response.arrayBuffer().catch(() => undefined); // release the connection
+      } finally {
+        clearTimeout(timeout);
+      }
       await options.onUnauthorized?.();
       continue;
     }

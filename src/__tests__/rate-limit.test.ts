@@ -9,6 +9,7 @@ import {
   parseRetryAfterHeader,
   rateLimitConfigsFromWindows,
   DEFAULT_RATE_LIMIT,
+  MAX_ADMISSION_WAIT_MS,
   MAX_BACKOFF_MS,
 } from '../rate-limit.js';
 import { PlytixError } from '../types.js';
@@ -242,6 +243,45 @@ describe('TokenBucket', () => {
     bucket.reconfigure([]);
     bucket.reconfigure({ limit: -1, windowMs: 1000 });
     expect(bucket.config).toEqual({ limit: 5, windowMs: 1000 });
+  });
+
+  it('keeps admission history across reconfigure, so shrinking a window cannot unlock a burst', async () => {
+    const { bucket, sleeps } = makeBucket(40, 10_000);
+    for (let i = 0; i < 5; i++) await bucket.take();
+    bucket.reconfigure({ limit: 3, windowMs: 5000 });
+    await bucket.take(); // 5 recent admissions > new limit of 3 → wait for the oldest to age out
+    expect(sleeps).toEqual([5000]);
+  });
+
+  it('fails fast instead of queueing past the admission cap (hourly window)', async () => {
+    const { bucket, sleeps } = makeBucket(1, MAX_ADMISSION_WAIT_MS * 10);
+    await bucket.take();
+    const error = await bucket.take().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PlytixError);
+    expect((error as PlytixError).status).toBe(429);
+    expect((error as PlytixError).rateLimit?.retryAfterMs).toBe(MAX_ADMISSION_WAIT_MS * 10);
+    expect((error as PlytixError).message).toMatch(/next slot in 300s/);
+    expect(sleeps).toEqual([]);
+    // the queue is not poisoned by the rejection
+    bucket.reconfigure({ limit: 5, windowMs: 1000 });
+    await bucket.take();
+  });
+
+  it('waitForPenalty honors a penalty extended while sleeping', async () => {
+    const { bucket, sleeps } = makeBucket(40, 10_000);
+    bucket.penalize(1000);
+    const originalSleep = sleeps;
+    // extend the penalty the first time the waiter goes to sleep
+    let extended = false;
+    const waiting = (async () => {
+      await bucket.waitForPenalty();
+    })();
+    if (!extended) {
+      extended = true;
+      bucket.penalize(3000);
+    }
+    await waiting;
+    expect(originalSleep.reduce((a, b) => a + b, 0)).toBe(3000);
   });
 
   it('reconfigure applies on the next take', async () => {

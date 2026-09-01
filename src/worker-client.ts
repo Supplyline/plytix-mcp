@@ -36,6 +36,7 @@ import {
   TokenBucket,
   decodeJwtRateLimits,
   fetchWithRetry,
+  isValidRateLimitConfig,
   rateLimitConfigsFromWindows,
   type RetryLogger,
 } from './rate-limit.js';
@@ -70,6 +71,7 @@ const tokenCache = new Map<string, PlytixAuthToken>();
 // so a per-instance bucket would let N concurrent requests for the same account each burst
 // the full window and ignore each other's 429 penalties. Tokens are already shared this way.
 const bucketCache = new Map<string, TokenBucket>();
+const MAX_CACHED_BUCKETS = 64;
 
 // De-dupes concurrent token fetches for the same credentials so a cold isolate (or a
 // post-expiry burst) fires a single auth request instead of one per in-flight call.
@@ -129,7 +131,13 @@ export class WorkerPlytixClient {
       timeoutMs: config.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
     };
 
-    if (config.rateLimit) this.bucketOverride = new TokenBucket(config.rateLimit);
+    if (config.rateLimit) {
+      if (isValidRateLimitConfig(config.rateLimit)) {
+        this.bucketOverride = new TokenBucket(config.rateLimit);
+      } else {
+        logRetry('plytix.rate_limit_config_ignored', { rateLimit: config.rateLimit });
+      }
+    }
   }
 
   /** Explicit override if configured, else the isolate-wide bucket for these credentials. */
@@ -138,6 +146,12 @@ export class WorkerPlytixClient {
     const cacheKey = await this.getCacheKey();
     let bucket = bucketCache.get(cacheKey);
     if (!bucket) {
+      // Bound the map: a long-lived isolate serving many distinct credential pairs must not
+      // grow without limit. Oldest-inserted goes first; losing it only forgets pacing history.
+      if (bucketCache.size >= MAX_CACHED_BUCKETS) {
+        const oldest = bucketCache.keys().next().value;
+        if (oldest !== undefined) bucketCache.delete(oldest);
+      }
       bucket = new TokenBucket(DEFAULT_RATE_LIMIT);
       bucketCache.set(cacheKey, bucket);
     }
