@@ -154,7 +154,15 @@ export class PlytixClient {
   }
 
   private async backoffOnRateLimit(rateLimitInfo?: RateLimitInfo): Promise<void> {
-    if (!rateLimitInfo || rateLimitInfo.remaining > 0) return;
+    // Plytix 429 responses report the limit in the JSON body, not in
+    // x-ratelimit-* headers, so rateLimitInfo is usually absent here. The
+    // documented window is 10s / 50 requests — wait with jitter so a burst
+    // of concurrent retries lands spread across the next window.
+    if (!rateLimitInfo) {
+      const delay = 4000 + Math.random() * 2000;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return;
+    }
 
     const now = Date.now();
     const resetTime = rateLimitInfo.reset * 1000; // Convert to milliseconds
@@ -170,7 +178,7 @@ export class PlytixClient {
   private async request<T = unknown>(
     endpoint: string,
     options: RequestInit = {},
-    retries = 1
+    retries = 3
   ): Promise<PlytixResult<T>> {
     const token = await this.getToken();
 
