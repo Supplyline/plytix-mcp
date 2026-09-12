@@ -791,3 +791,34 @@ describe('batch update transport failures', () => {
     expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
   });
 });
+
+describe('authorized catalog corrections', () => {
+  it('executes a scoped series_name correction without a delete or permission token', async () => {
+    let name = 'C-600';
+    const ops = makeOps({
+      resolved: { 'BWI-C600': [{ id: 'product-1', sku: 'BWI-C600' }] },
+      get: async () => ({ data: [{ id: 'product-1', sku: 'BWI-C600', attributes: { series_name: name, org_id: 'BWI' } }] }),
+      update: async () => {
+        name = 'C600';
+        return { data: [{ id: 'product-1', sku: 'BWI-C600' }] };
+      },
+    });
+    // Source, ownership and existing authority are gated upstream by ETL.
+    const items = [{ sku: 'BWI-C600', product_id: 'product-1',
+      attributes: { series_name: 'C600' },
+      expected_attributes: { series_name: 'C-600', org_id: 'BWI' } }];
+    const preview = await executeBatchUpdate(ops, items, { maxItems: 20, dryRun: true });
+    expect(preview.failures).toHaveLength(0);
+    expect(ops.updateProduct).not.toHaveBeenCalled();
+    const result = await executeBatchUpdate(ops, items, { maxItems: 20 });
+    expect(result.summary.succeeded).toBe(1);
+    expect(ops.updateProduct).toHaveBeenCalledWith('product-1', { attributes: { series_name: 'C600' } });
+    // Mandatory caller-owned independent readback, separate from PATCH receipt.
+    const readback = await ops.getProduct('product-1');
+    expect(readback.data[0].attributes).toEqual({ series_name: 'C600', org_id: 'BWI' });
+    // An old manifest cannot replay after the value changes.
+    const replay = await executeBatchUpdate(ops, items, { maxItems: 20 });
+    expect(replay.failures).toHaveLength(1);
+    expect(ops.updateProduct).toHaveBeenCalledTimes(1);
+  });
+});

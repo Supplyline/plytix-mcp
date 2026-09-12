@@ -282,3 +282,18 @@ The cap comes from `PLYTIX_MCP_MAX_DELETES` (default 3, `0` disables deletes).
 Note the gate's limits: the token is returned to the calling agent, so this is
 a forced pause with a preview, not human confirmation. See the README section
 for the `elicitInput` upgrade path.
+
+## Supplyline catalog correction authority
+
+Eric's 2026-09-12 policy replaces the blanket Structure/System prohibition. Existing
+catalog-correction authorization includes those groups when needed; an authorized,
+source-proven `series_name` correction does not need a second permission request.
+Ownership belongs in the upstream ETL policy, not a second registry in this generic server.
+Use ETL's `docs/context/catalog-write-policy.md` and correction manifest gate: source and
+ownership evidence, exact scope, validated values and fresh `expected_attributes`.
+Submit through `products_batch_update_manifest` in <=20-item chunks, dry-run and live on
+identical bytes. Independently call `products_get` after each chunk; a batch success is
+transport evidence, not verified readback. Preserve manifests and reconcile uncertainty
+without replay. Derived fields are repaired through their source owner; platform-owned
+fields, lifecycle/identity operations, Media and destructive operations retain their routes.
+The delete confirmation-token flow is not applicable to an ordinary attribute correction.
