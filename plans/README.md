@@ -19,7 +19,7 @@ its STOP conditions, and update your row when done.
 | 006  | Dependency refresh (MCP SDK to 1.29.x, wrangler bump; zod stays v3) | P3 | S | — | TODO |
 | 007  | Post-ship fixes for the batch update/export implementation (review findings of 2026-06-10) | P1 | S–M | — | DONE (this session — see PR) |
 | 008  | Real 429 handling: body-aware backoff, client-level token bucket, limits learned from JWT (Plytix sends no rate-limit headers) | P1 | S–M | absorbs PR #37 (merged `81da7dd`) | DONE — PR #39 after 6 Codex review rounds (235 tests; live: 215-attr cache build 0×429, 25-row dry run 0×429) |
-| 009  | `products_bulk_update` + `products_bulk_status` on Plytix's async bulk job endpoint (Path 2) | P1 | M | REST-EVIDENCE `async_endpoint_confirmed` | IN REVIEW — PR pending (294 tests; live: 4-row job settled `succeeded: 4`, 5 requests) |
+| 009  | `products_bulk_update` + `products_bulk_status` on Plytix's async bulk job endpoint (Path 2) | P1 | M | REST-EVIDENCE `async_endpoint_confirmed` | DONE — PR #44 after 3 Opus review rounds (306 tests; live: 4-row job settled `succeeded: 4`, 5 requests, 5.5 s) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale) | SUPERSEDED
 

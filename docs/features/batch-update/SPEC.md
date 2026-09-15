@@ -357,9 +357,10 @@ its status vocabulary has already drifted from its own draft doc, so the status 
 but never trusted for completion. `products_bulk_status` with `expected_total` is how a
 caller confirms a job that outlived the wait budget.
 
-Summary semantics: `summary` counts rows and always reconciles to `total` on a settled job
-(`failed` = max(detailed error rows, error counter); on a job that ends in a failure state
-every unprocessed row counts as failed). `failures[]` may additionally carry diagnostic rows
+Summary semantics: `summary` counts rows as Plytix reports them (`failed` = max(detailed
+error rows, error counter); on a job that ends in a failure state every unprocessed row counts
+as failed). It reconciles to `total` whenever Plytix's counters and error rows agree; when they
+do not, the summary still reports what the server said and a diagnostic row flags it. `failures[]` may additionally carry diagnostic rows
 with `index: -1` (job-level failure, undetailed errors, counter disagreement) that are not
 counted. A submit that fails with a 5xx/transport error is reported as *ambiguous* — the job
 may exist — and the caller is told not to resubmit blindly. Shared core: `src/batch/bulk.ts`.

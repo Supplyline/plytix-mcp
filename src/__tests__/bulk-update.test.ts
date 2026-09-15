@@ -367,7 +367,7 @@ describe('executeBulkUpdate', () => {
     const rejected = Object.assign(new Error('Request failed: 422 - bad label'), { status: 422 });
     const error = await executeBulkUpdate(makeOps([], rejected), ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() }).catch((e: unknown) => e);
     expect((error as BulkSubmitError).ambiguous).toBe(false);
-    expect((error as BulkSubmitError).safeMessage).toBe('bulk submit was rejected (HTTP 422); nothing was queued');
+    expect((error as BulkSubmitError).safeMessage).toBe('bulk submit was rejected by Plytix; nothing was queued');
     expect((error as Error).message).toMatch(/nothing was queued: Request failed: 422 - bad label$/);
     expect((error as BulkSubmitError).safeMessage).not.toMatch(/bad label/); // no upstream body
   });

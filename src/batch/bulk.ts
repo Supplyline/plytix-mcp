@@ -467,7 +467,7 @@ export async function executeBulkUpdate(
       status === 429
         ? 'bulk submit was rate limited; nothing was queued'
         : !isAmbiguousSubmitStatus(status)
-          ? `bulk submit was rejected (HTTP ${status}); nothing was queued`
+          ? 'bulk submit was rejected by Plytix; nothing was queued'
           : `bulk submit failed after the request was sent — the job MAY still have been created on Plytix; do not resubmit these ${rows.length} rows without checking the products first`;
     throw new BulkSubmitError(safe, detail, error);
   }
