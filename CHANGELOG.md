@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-15
+
+### Added
+- `products_bulk_update` and `products_bulk_status` on both surfaces, built on Plytix's async
+  bulk job endpoint (`POST /api/v1/bulk/products`, `GET /api/v1/bulk/products/<job_id>`),
+  confirmed first-party and verified by a controlled write (see
+  `docs/features/batch-update/REST-EVIDENCE.md`). One call submits up to 1,000 updates as a
+  single job and waits for it to settle; stdio also accepts a `manifest_path`. Shared core in
+  `src/batch/bulk.ts`; client methods `submitBulkProductUpdate`, `getBulkProductJob`,
+  `bulkUpdateProducts`, `getBulkUpdateStatus`.
+- The job is reported settled only when `ok + error + cancelled` account for every submitted
+  row — Plytix reports `"Finished"` before the summary is populated, and a naive
+  poll-until-Finished sees `ok: 0` on a fully successful job. If the wait budget
+  (`wait_timeout_ms`, default 45 s) runs out, the result is `status: "pending"` with the
+  `job_id`; `products_bulk_status` with `expected_total` picks it up.
+- Items carrying `expected_attributes` / `if_match` are rejected up front: the bulk endpoint
+  has no optimistic-concurrency guard and silently stripping one would be the worst failure.
+  `products_batch_update` remains the guarded path.
+- `summary` counts rows and reconciles to `total` on a settled job; on a job that ends in a
+  failure state, unprocessed rows count as failed. `failures[]` may carry uncounted
+  diagnostic rows (`index: -1`). A submit that fails with a 5xx or transport error throws
+  `BulkSubmitError` with `ambiguous: true` — the job may have been created — and the message
+  says not to resubmit blindly; the Worker surfaces that guidance without the upstream body.
+  Wait budget: default 45 s, hard cap 120 s (stdio) / 45 s (Worker); request body cap 8 MB.
+- `BatchUpdateFailureStage` gains `'bulk'` for server-reported row errors.
+
 ## [0.3.5] - 2026-09-01
 
 ### Changed

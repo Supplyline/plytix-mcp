@@ -90,6 +90,8 @@ src/
 | `products_update` | Update product fields and attributes (PATCH) |
 | `products_batch_update` | Update a small batch of products by `product_id` or `sku` (PATCH loop; inline capped; supports drift guards) |
 | `products_batch_update_manifest` | Update products from a local JSON manifest (stdio-only; supports dry run and drift guards) |
+| `products_bulk_update` | Submit up to 1,000 updates as ONE async Plytix bulk job and wait for it to settle (no drift guards; `pending` + `job_id` if the wait budget runs out; stdio also accepts `manifest_path`) |
+| `products_bulk_status` | Poll a bulk job by `job_id`; pass `expected_total` so completion can be confirmed (Plytix reports "Finished" before the summary is populated) |
 | `products_assign_family` | Assign or unassign family (may cause data loss) |
 | `products_set_attribute` | Set one product attribute atomically |
 | `products_clear_attribute` | Clear one product attribute atomically |

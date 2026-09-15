@@ -28,6 +28,10 @@ import type {
   RateLimitWindow,
   BatchUpdateMetadata,
   BatchUpdateResult,
+  BulkJobRecord,
+  BulkJobSummary,
+  BulkProductRow,
+  BulkUpdateResult,
   ProductBatchExportInput,
   ProductBatchExportResult,
   ProductBatchExportToFileInput,
@@ -59,6 +63,13 @@ import {
   type ExecuteBatchExportOptions,
 } from './batch/export.js';
 import { exportProductsToFile } from './batch/export-file.js';
+import {
+  BULK_MAX_ITEMS,
+  executeBulkUpdate,
+  pollBulkJob,
+  type ExecuteBulkUpdateOptions,
+  type PollBulkJobOptions,
+} from './batch/bulk.js';
 
 const DEFAULT_CONFIG = {
   baseUrl: 'https://pim.plytix.com',
@@ -313,6 +324,56 @@ export class PlytixClient {
     input: ProductBatchExportToFileInput
   ): Promise<ProductBatchExportResult> {
     return exportProductsToFile(this, input);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Bulk product updates (POST /api/v1/bulk/products — async job)
+  // ─────────────────────────────────────────────────────────────
+
+  /** Submit one bulk job. Mutation: paced and 429-retried, never replayed on 5xx. */
+  async submitBulkProductUpdate(rows: BulkProductRow[]): Promise<BulkJobRecord> {
+    const result = await this.request<BulkJobRecord>('/api/v1/bulk/products', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'update', products: rows }),
+    });
+    const job = result.data?.[0];
+    if (!job?.id) {
+      throw new PlytixError('Bulk submit returned no job id', undefined, result);
+    }
+    return job;
+  }
+
+  async getBulkProductJob(jobId: string): Promise<BulkJobSummary> {
+    const result = await this.request<BulkJobSummary>(
+      `/api/v1/bulk/products/${encodeURIComponent(jobId)}`
+    );
+    const job = result.data?.[0];
+    if (!job) {
+      throw new PlytixError(`Bulk job ${jobId} returned no data`, undefined, result);
+    }
+    return job;
+  }
+
+  async bulkUpdateProducts(
+    items: unknown,
+    options: Partial<ExecuteBulkUpdateOptions> = {}
+  ): Promise<BulkUpdateResult> {
+    return executeBulkUpdate(this, items, {
+      maxItems: options.maxItems ?? BULK_MAX_ITEMS,
+      maxBytes: options.maxBytes,
+      dryRun: options.dryRun,
+      wait: options.wait,
+      waitTimeoutMs: options.waitTimeoutMs,
+      returnSuccesses: options.returnSuccesses,
+      metadata: options.metadata,
+    });
+  }
+
+  async getBulkUpdateStatus(
+    jobId: string,
+    options: PollBulkJobOptions = {}
+  ): Promise<BulkUpdateResult> {
+    return pollBulkJob(this, jobId, options);
   }
 
   async getProduct(id: string): Promise<PlytixResult<PlytixProduct>> {

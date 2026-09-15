@@ -604,3 +604,99 @@ describe('PlytixClient rate limiting', () => {
     expect(explicit.getRateLimits()).toEqual([{ limit: 2, windowSeconds: 10 }]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// Bulk product updates — POST /api/v1/bulk/products
+// ─────────────────────────────────────────────────────────────
+
+describe('PlytixClient bulk update', () => {
+  const bulkUrl = (u: string) => u.endsWith('/api/v1/bulk/products');
+  const jobUrl = (u: string) => /\/api\/v1\/bulk\/products\/[^/]+$/.test(u);
+  const JOB = { data: [{ id: 'job-9', state: 'CREATED' }] };
+  const DONE = { data: [{ status: 'Finished', summary: { ok: '1', error: '0', cancelled: '0' }, products: [{ id: 'p-a', sku: 'A' }], errors: [] }] };
+
+  it('submits the documented body and polls the job to a settled result', async () => {
+    const bodies: string[] = [];
+    stubFetch(authRoute(), (url, init) => {
+      if (bulkUrl(url) && init?.method === 'POST') {
+        bodies.push(String(init.body));
+        return json(JOB);
+      }
+      if (jobUrl(url)) return json(DONE);
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    const result = await client.bulkUpdateProducts([{ sku: 'A', attributes: { box_1: 'FD' } }], {
+      returnSuccesses: true,
+    });
+
+    expect(JSON.parse(bodies[0])).toEqual({
+      action: 'update',
+      products: [{ sku: 'A', data: { attributes: { box_1: 'FD' } } }],
+    });
+    expect(result.status).toBe('finished');
+    if (result.status !== 'finished') return;
+    expect(result.job?.id).toBe('job-9');
+    expect(result.summary).toEqual({ total: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(result.successes).toEqual([{ key: 'A', index: 0, product_id: 'p-a' }]);
+  });
+
+  it('does not replay a submit that 5xxs, and says the job may have been created', async () => {
+    let submits = 0;
+    stubFetch(authRoute(), (url, init) => {
+      if (bulkUrl(url) && init?.method === 'POST') {
+        submits++;
+        return json({ error: 'bad gateway' }, 502);
+      }
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    await expect(client.bulkUpdateProducts([{ sku: 'A', label: 'x' }])).rejects.toMatchObject({ status: 502, ambiguous: true });
+    expect(submits).toBe(1);
+  });
+
+  it('retries a rate-limited submit (429 means nothing was queued)', async () => {
+    vi.useFakeTimers();
+    let submits = 0;
+    stubFetch(authRoute(), (url, init) => {
+      if (bulkUrl(url) && init?.method === 'POST') {
+        submits++;
+        return submits === 1 ? json({ message: 'API rate limit exceeded', limit: 50, window_size: 10 }, 429) : json(JOB);
+      }
+      if (jobUrl(url)) return json(DONE);
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    const pending = client.bulkUpdateProducts([{ sku: 'A', label: 'x' }]);
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await pending;
+    expect(submits).toBe(2);
+    expect(result.status).toBe('finished');
+  });
+
+  it('surfaces a submit response without a job id as an error', async () => {
+    stubFetch(authRoute(), (url, init) =>
+      bulkUrl(url) && init?.method === 'POST' ? json({ data: [{}] }) : undefined
+    );
+    const client = makeClient(UNPACED);
+    await expect(client.bulkUpdateProducts([{ sku: 'A', label: 'x' }])).rejects.toThrow(/no job id/);
+  });
+
+  it('getBulkUpdateStatus reads one snapshot and encodes the job id', async () => {
+    const urls: string[] = [];
+    stubFetch(authRoute(), (url) => {
+      if (jobUrl(url)) {
+        urls.push(url);
+        return json(DONE);
+      }
+      return undefined;
+    });
+    const client = makeClient(UNPACED);
+    const result = await client.getBulkUpdateStatus('job/with slash', { submitted: 1 });
+    expect(urls[0]).toMatch(/\/api\/v1\/bulk\/products\/job%2Fwith%20slash$/);
+    expect(result.status).toBe('finished');
+  });
+});

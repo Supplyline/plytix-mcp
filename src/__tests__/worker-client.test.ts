@@ -342,3 +342,31 @@ describe('WorkerPlytixClient attribute cache', () => {
     );
   });
 });
+
+describe('WorkerPlytixClient bulk update', () => {
+  const UNPACED = { rateLimit: { limit: 10_000, windowMs: 1000 } };
+
+  it('submits the documented body and does not replay a 5xx submit', async () => {
+    const bodies: string[] = [];
+    let submits = 0;
+    stubFetch(authRoute(), (url, init) => {
+      if (url.endsWith('/api/v1/bulk/products') && init?.method === 'POST') {
+        submits++;
+        bodies.push(String(init.body));
+        return submits === 1 ? json({ data: [{ id: 'job-1', state: 'CREATED' }] }) : json({ error: 'bad gateway' }, 502);
+      }
+      if (/\/api\/v1\/bulk\/products\/job-1$/.test(url)) {
+        return json({ data: [{ status: 'Finished', summary: { ok: '1', error: '0', cancelled: '0' }, products: [{ id: 'p-a', sku: 'A' }], errors: [] }] });
+      }
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    const ok = await client.bulkUpdateProducts([{ sku: 'A', label: 'x' }]);
+    expect(JSON.parse(bodies[0])).toEqual({ action: 'update', products: [{ sku: 'A', data: { label: 'x' } }] });
+    expect(ok.status).toBe('finished');
+
+    await expect(client.bulkUpdateProducts([{ sku: 'B', label: 'y' }])).rejects.toMatchObject({ status: 502 });
+    expect(submits).toBe(2);
+  });
+});

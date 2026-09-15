@@ -336,6 +336,35 @@ Live verification after implementation:
 3. Confirm returned failures/successes match Plytix state before using the tool on the
    full manifest.
 
+## Bulk endpoint tools (added 2026-09-15)
+
+Once `REST-EVIDENCE.md` reached `async_endpoint_confirmed`, two tools were added on **both**
+surfaces that use Plytix's async bulk job directly (`POST /api/v1/bulk/products`,
+`GET /api/v1/bulk/products/<job_id>`). They deliberately do **not** replace
+`products_batch_update`:
+
+| | `products_batch_update` | `products_bulk_update` |
+|---|---|---|
+| Write path | one PATCH per row, paced | one job per call, ≤1,000 rows |
+| Drift guards | `expected_attributes` / `if_match` | **rejected** (endpoint has none) |
+| Requests for N rows | ~2N | 1 + polls |
+| Result | per-row, synchronous | job counters + per-row server errors; `pending` + `job_id` if not settled within `wait_timeout_ms` (default 45 s) |
+
+Settledness rule (verified live): a job is done when its counters account for every row —
+`ok + error + cancelled` ≥ rows submitted — **whatever the status string says**, or when the
+status is a failure state. Plytix reports `"Finished"` before the summary is populated, and
+its status vocabulary has already drifted from its own draft doc, so the status is reported
+but never trusted for completion. `products_bulk_status` with `expected_total` is how a
+caller confirms a job that outlived the wait budget.
+
+Summary semantics: `summary` counts rows as Plytix reports them (`failed` = max(detailed
+error rows, error counter); on a job that ends in a failure state every unprocessed row counts
+as failed). It reconciles to `total` whenever Plytix's counters and error rows agree; when they
+do not, the summary still reports what the server said and a diagnostic row flags it. `failures[]` may additionally carry diagnostic rows
+with `index: -1` (job-level failure, undetailed errors, counter disagreement) that are not
+counted. A submit that fails with a 5xx/transport error is reported as *ambiguous* — the job
+may exist — and the caller is told not to resubmit blindly. Shared core: `src/batch/bulk.ts`.
+
 ## Review Decisions
 
 1. Include the off-context disk-submit path in v1, but expose it as
