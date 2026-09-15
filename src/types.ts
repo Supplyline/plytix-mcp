@@ -143,7 +143,8 @@ export type BatchUpdateFailureStage =
   | 'duplicate'
   | 'read'
   | 'conflict'
-  | 'patch';
+  | 'patch'
+  | 'bulk';
 
 export interface BatchUpdateErrorDetail {
   field?: string;
@@ -192,6 +193,95 @@ export type BatchUpdateResult =
       failures: BatchUpdateFailure[];
       successes?: BatchUpdateSuccess[];
       metadata?: BatchUpdateMetadata;
+    };
+
+// ─────────────────────────────────────────────────────────────
+// Bulk Product Updates (POST /api/v1/bulk/products — async job)
+// ─────────────────────────────────────────────────────────────
+
+/** One row of the bulk request body. `id` wins when both identifiers are present. */
+export interface BulkProductRow {
+  id?: string;
+  sku?: string;
+  data: {
+    label?: string;
+    status?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+
+/** The job record the submit call returns (`data[0]`). */
+export interface BulkJobRecord {
+  id: string;
+  state?: string;
+  created_at?: string;
+  modified?: string;
+  display_name?: string;
+  by_user?: string;
+  external_process_id?: string;
+  [key: string]: unknown;
+}
+
+/** The job summary the status call returns (`data[0]`). Counters arrive as strings. */
+export interface BulkJobSummary {
+  status?: string;
+  action?: string;
+  summary?: {
+    ok?: string | number;
+    error?: string | number;
+    cancelled?: string | number;
+  };
+  products?: Array<{ id: string; sku?: string }>;
+  errors?: Array<{
+    sku?: string;
+    id?: string;
+    errors?: Array<Record<string, unknown>>;
+  }>;
+}
+
+export interface BulkJobCounters {
+  ok: number;
+  error: number;
+  cancelled: number;
+}
+
+export interface BulkJobInfo {
+  id: string;
+  /** Server status string as received (`"In progress"`, `"Finished"`, …), or null if unknown. */
+  status: string | null;
+  counters: BulkJobCounters;
+  /**
+   * true: terminal and the counters account for every submitted row. false: not yet.
+   * null: cannot be determined because the submitted row count is unknown (status tool
+   * without `expected_total`).
+   */
+  settled: boolean | null;
+}
+
+export type BulkUpdateResult =
+  | {
+      status: 'rejected';
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      metadata?: BatchUpdateMetadata;
+    }
+  | {
+      status: 'finished';
+      dry_run?: boolean;
+      job?: BulkJobInfo;
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      successes?: BatchUpdateSuccess[];
+      metadata?: BatchUpdateMetadata;
+    }
+  | {
+      status: 'pending';
+      job: BulkJobInfo;
+      summary: BatchUpdateSummary;
+      failures: BatchUpdateFailure[];
+      successes?: BatchUpdateSuccess[];
+      metadata?: BatchUpdateMetadata;
+      next: string;
     };
 
 // ─────────────────────────────────────────────────────────────

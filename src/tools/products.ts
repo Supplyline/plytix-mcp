@@ -22,6 +22,7 @@ import {
   STDIO_INLINE_MAX_ITEMS,
 } from '../batch/helpers.js';
 import { readBatchManifest } from '../batch/manifest.js';
+import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS } from '../batch/bulk.js';
 import {
   STDIO_EXPORT_INLINE_MAX_BYTES,
   STDIO_EXPORT_INLINE_MAX_ROWS,
@@ -789,6 +790,135 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
             {
               type: 'text',
               text: `Error reading batch manifest: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.bulk_update - One async bulk job (POST /api/v1/bulk/products)
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    items?: unknown[];
+    manifest_path?: string;
+    dry_run?: boolean;
+    wait?: boolean;
+    wait_timeout_ms?: number;
+    return_successes?: boolean;
+  }>(
+    server,
+    'products_bulk_update',
+    {
+      title: 'Bulk Update Products (async job)',
+      description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status.`,
+      inputSchema: {
+        items: z
+          .array(batchUpdateItemSchema)
+          .optional()
+          .describe(`Products to update inline (max ${BULK_MAX_ITEMS} items and ${STDIO_INLINE_MAX_BYTES} serialized bytes). Exactly one of items or manifest_path.`),
+        manifest_path: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(`Path to a schema_version: 1 JSON manifest (max ${BULK_MAX_ITEMS} items per job). Exactly one of items or manifest_path.`),
+        dry_run: z.boolean().optional().describe('Validate and count without submitting (no network call)'),
+        wait: z.boolean().optional().describe('Poll the job until settled (default true). false returns pending with the job_id immediately.'),
+        wait_timeout_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(`Max time to wait for the job to settle (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})`),
+        return_successes: z.boolean().optional().describe('Include one success row per updated product'),
+      },
+    },
+    async ({ items, manifest_path, dry_run, wait, wait_timeout_ms, return_successes }) => {
+      try {
+        if ((items === undefined) === (manifest_path === undefined)) {
+          return {
+            content: [{ type: 'text', text: 'Provide exactly one of items or manifest_path' }],
+            isError: true,
+          };
+        }
+        let input: unknown = items;
+        let metadata;
+        let maxBytes: number | undefined = STDIO_INLINE_MAX_BYTES;
+        if (manifest_path !== undefined) {
+          const manifest = await readBatchManifest(manifest_path);
+          input = manifest.items;
+          metadata = manifest.metadata;
+          maxBytes = undefined; // the manifest reader already enforces its own byte cap
+        }
+        const result = await client.bulkUpdateProducts(input, {
+          maxItems: BULK_MAX_ITEMS,
+          maxBytes,
+          dryRun: dry_run === true,
+          wait: wait !== false,
+          waitTimeoutMs: wait_timeout_ms,
+          returnSuccesses: return_successes === true,
+          metadata,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'rejected' ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error running bulk update: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products.bulk_status - Poll a bulk job
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    job_id: string;
+    expected_total?: number;
+    wait?: boolean;
+    wait_timeout_ms?: number;
+    return_successes?: boolean;
+  }>(
+    server,
+    'products_bulk_status',
+    {
+      title: 'Bulk Update Job Status',
+      description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null.',
+      inputSchema: {
+        job_id: z.string().min(1).describe('Job id returned by products_bulk_update'),
+        expected_total: z.number().int().positive().optional().describe('Rows submitted in the job'),
+        wait: z.boolean().optional().describe('Keep polling until settled or the budget runs out (default false)'),
+        wait_timeout_ms: z.number().int().positive().optional().describe(`Wait budget when wait is true (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})`),
+        return_successes: z.boolean().optional().describe('Include one success row per updated product'),
+      },
+    },
+    async ({ job_id, expected_total, wait, wait_timeout_ms, return_successes }) => {
+      try {
+        const result = await client.getBulkUpdateStatus(job_id, {
+          submitted: expected_total,
+          wait: wait === true,
+          waitTimeoutMs: wait_timeout_ms,
+          returnSuccesses: return_successes === true,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error reading bulk job: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
           isError: true,

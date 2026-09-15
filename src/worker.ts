@@ -15,6 +15,7 @@ import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
+import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS } from './batch/bulk.js';
 import {
   WORKER_EXPORT_INLINE_MAX_BYTES,
   WORKER_EXPORT_INLINE_MAX_ROWS,
@@ -880,6 +881,52 @@ const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['items'],
+    },
+  },
+  {
+    name: 'products_bulk_update',
+    description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: `Products to update (max ${BULK_MAX_ITEMS} items and ${WORKER_INLINE_MAX_BYTES} serialized bytes)`,
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Product SKU (used when product_id is absent)' },
+              product_id: { type: 'string', description: 'Product ID (wins over sku)' },
+              label: { type: 'string', description: 'New product label/name' },
+              status: { type: 'string', description: 'New product status' },
+              attributes: {
+                type: 'object',
+                description: 'Attributes to update (use attribute labels as keys)',
+              },
+            },
+          },
+        },
+        dry_run: { type: 'boolean', description: 'Validate and count without submitting (no network call)' },
+        wait: { type: 'boolean', description: 'Poll the job until settled (default true). false returns pending with the job_id immediately.' },
+        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Max time to wait for the job to settle (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})` },
+        return_successes: { type: 'boolean', description: 'Include one success row per updated product' },
+      },
+      required: ['items'],
+    },
+  },
+  {
+    name: 'products_bulk_status',
+    description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Job id returned by products_bulk_update' },
+        expected_total: { type: 'integer', minimum: 1, description: 'Rows submitted in the job' },
+        wait: { type: 'boolean', description: 'Keep polling until settled or the budget runs out (default false)' },
+        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Wait budget when wait is true (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})` },
+        return_successes: { type: 'boolean', description: 'Include one success row per updated product' },
+      },
+      required: ['job_id'],
     },
   },
   {
@@ -1976,6 +2023,33 @@ const toolHandlers: Record<string, ToolHandler> = {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       ...(result.status === 'rejected' ? { isError: true } : {}),
     };
+  },
+
+  async products_bulk_update(args, client) {
+    const result = await client.bulkUpdateProducts(args.items, {
+      maxItems: BULK_MAX_ITEMS,
+      maxBytes: WORKER_INLINE_MAX_BYTES,
+      dryRun: args.dry_run === true,
+      wait: args.wait !== false,
+      waitTimeoutMs: typeof args.wait_timeout_ms === 'number' ? args.wait_timeout_ms : undefined,
+      returnSuccesses: args.return_successes === true,
+    });
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      ...(result.status === 'rejected' ? { isError: true } : {}),
+    };
+  },
+
+  async products_bulk_status(args, client) {
+    const result = await client.getBulkUpdateStatus(args.job_id as string, {
+      submitted: typeof args.expected_total === 'number' ? args.expected_total : undefined,
+      wait: args.wait === true,
+      waitTimeoutMs: typeof args.wait_timeout_ms === 'number' ? args.wait_timeout_ms : undefined,
+      returnSuccesses: args.return_successes === true,
+    });
+
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   },
 
   async products_assign_family(args, client) {

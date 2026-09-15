@@ -98,7 +98,7 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
-The remote worker exposes 46 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
+The remote worker exposes 48 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
 ### Protocol versions
 
@@ -144,6 +144,8 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `products_update` | Partial update to product fields/attributes |
 | `products_batch_update` | Apply a small guarded product-update batch |
 | `products_batch_update_manifest` | Stdio-only guarded product updates from a local JSON manifest |
+| `products_bulk_update` | Submit up to 1,000 updates as ONE async Plytix bulk job and wait for it to settle (no drift guards; `pending` + `job_id` if the wait budget runs out; stdio also accepts `manifest_path`) |
+| `products_bulk_status` | Poll a bulk job by `job_id`; pass `expected_total` so completion can be confirmed (Plytix reports "Finished" before the summary is populated) |
 | `products_assign_family` | Assign or unassign a product family |
 | `products_set_attribute` | Atomic set of one attribute value |
 | `products_clear_attribute` | Atomic clear of one attribute value |
