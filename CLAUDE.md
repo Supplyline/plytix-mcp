@@ -175,8 +175,9 @@ Optional:
 - v2 search: max 50 attributes
 - v1 search: max 20 attributes
 
-**Rate limits:** 50 req / 10 s and 15,000 req / h (raised from 5,000 by Plytix CSM Eva Rodriguez,
-2026-09-15) per account, advertised only in the auth JWT
+**Rate limits:** per account and per plan — 50 req / 10 s burst, and an hourly cap of 5,000
+(Standard) or 15,000 (Pro) API calls per [plytix.com/pricing](https://www.plytix.com/pricing).
+Both are advertised only in the auth JWT
 (`user_claims.account.rate_limit`); no `x-ratelimit-*` headers. See
 `docs/solutions/api-quirks/plytix-api.md` §16a.
 

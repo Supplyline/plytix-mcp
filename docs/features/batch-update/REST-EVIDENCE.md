@@ -48,8 +48,8 @@ search tools make). No write-method probing was performed.
 
 ## Addendum 2026-09-15 — first-party bulk documentation received; route confirmed live
 
-**Source:** `plytix-bulk-actions-draft-2021.pdf` (this directory), sent by Plytix CSM Eva
-Rodriguez to Eric on 2026-09-15 together with the hourly limit increase to 15,000. Title:
+**Source:** `plytix-bulk-actions-draft-2021.pdf` (this directory), provided by Plytix customer
+success on request, 2026-09-15. Title:
 "Bulk actions for public API — Draft documentation of product bulk actions", Plytix Aps 2021.
 This is the first-party evidence the implementation rule above was waiting for, with one
 caveat: it is marked **draft** and is not on apidocs.plytix.com.

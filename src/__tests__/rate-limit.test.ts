@@ -95,7 +95,7 @@ describe('decodeJwtRateLimits', () => {
         user_claims: {
           user: { name: 'Claude', filler: '~?>'.repeat(n) },
           account: {
-            name: 'Supplyline ~ test',
+            name: 'Example Co ~ test',
             rate_limit: [
               { limit: 50, window_size: 10 },
               { limit: 5000, window_size: 3600 },

@@ -19,7 +19,7 @@ Two findings beyond the plan:
 - `filter_type` differs between search and the per-id GET for the same attribute, and
   `created` is search-only-absent. Neither is consumed; both are documented and excluded.
 
-Live result on the Supplyline account (215 attributes): **3 search calls, 0 per-id GETs,
+Live result on a 215-attribute account: **3 search calls, 0 per-id GETs,
 4.6 s cold** (was 216 requests / ~55 s), warm cache 0 requests.
 
 Two hardenings added after a Codex review round, both about the cache becoming load-bearing

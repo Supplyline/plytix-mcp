@@ -26,7 +26,7 @@
 
 ## Why this matters
 
-Verified live against the Supplyline account on 2026-09-01:
+Verified live against a Pro-plan account on 2026-09-01:
 
 - Plytix enforces **two windows**, both read from the auth JWT's
   `user_claims.account.rate_limit`: `{limit: 50, window_size: 10}` and
@@ -52,7 +52,7 @@ traffic on the account.
 
 ## Lessons folded in (from the other two clients + adversarial pass)
 
-From Sasha's `PlytixApiService.php` — the most complete of our three clients:
+From a sibling PHP integration's `PlytixApiService.php` — the most complete of our three clients:
 - **L1** Honor `Retry-After` (numeric seconds *or* HTTP-date) if it ever appears.
 - **L2** Parse the 429 body two ways: free-text `retry after N milliseconds|seconds` and
   JSON `ttl` (ms). Take the **max** of server hint and our schedule, never the min.
@@ -307,7 +307,7 @@ is not needed since Node 24 has it):
 
 - [ ] `npm test`, `npm run typecheck`, `npx tsc -p tsconfig.worker.json`, `npm run test:mcp` all green.
 - [ ] `grep -rn "rateLimitInfo\|backoffOnRateLimit\|parseRateLimitHeaders" src` → 0 hits.
-- [ ] Live (read-only, opt-in, needs creds): cold `attributes_list` on the Supplyline account
+- [ ] Live (read-only, opt-in, needs creds): cold `attributes_list` on a 215-attribute account
       (≈ 215 attributes) completes with **zero** lost attributes and no
       "Attribute cache build failed". Record wall time in the PR.
 - [ ] Live: a 25-row `products_batch_update` dry-run (guard reads only) → no 429 failures.
