@@ -83,8 +83,29 @@ and does not block this.
 The 404 is a handler response for an unknown id, and the 422 names the handler class — the
 route family exists and **this credential is authorized** (contrast the 403 on `/api/v1/jobs`).
 
-**Status of the implementation rule:** first-party + route live + credential authorized →
-this is sufficient to move from `use_patch_loop` toward `async_endpoint_confirmed`, **pending
-one controlled write** (a single product, one attribute, value already equal to the live value)
-to confirm the draft's request/response shape against the current API. Not run in this session;
-needs Eric's go-ahead and a target SKU.
+**Controlled write, 2026-09-15 (authorized; 4 Archived standalone products, one text
+attribute set from null to a value; plus one job with a nonexistent SKU):**
+
+| Step | Observed |
+|---|---|
+| `POST /api/v1/bulk/products` (4 rows by `sku`) | `200` in ~0.7 s. Job record `state: "CREATED"` (draft says `QUEUED`), plus `external_process_id` (= `id`). |
+| First `GET …/<job_id>` at ~0.4 s | `status: "Finished"` — but `summary: {ok:"0", error:"0", cancelled:"0"}` and `products: []`. |
+| Same GET minutes later | `status: "Finished"`, `summary.ok: "4"`, `products: [{id, sku} ×4]`. |
+| Product read-back (v2 GET) | attribute set on all 4; `modified` bumped; no other attribute changed; `overwritten_attributes` unchanged. |
+| Bad-SKU job | `In progress` at 0.4 s → `Finished` at 1.5 s; `errors: [{sku, errors: [{sku: "sku does not exist"}]}]`, `summary.error: "1"`. No product created. |
+
+Draft-vs-live differences a client must handle:
+
+- Status strings are Title-case: `"Finished"`, `"In progress"` (draft: `FINISHED`). Submit state is
+  `"CREATED"` (draft: `QUEUED`). `summary` has a third counter, `cancelled`. Counters are strings.
+- **`Finished` arrives before the summary is written.** The writes had landed, but `ok` and
+  `products` lagged the status by more than the first poll. A terminal condition must be
+  `status == Finished` **and** `ok + error + cancelled == rows submitted`, with a bounded
+  re-poll — or read the products back, which is what the batch runner's guard reads do anyway.
+- Error rows carry `{<field>: message}` pairs under `errors[].errors[]`, keyed by the field the
+  server objected to (`sku` for an unknown SKU), exactly as the draft shows for attributes.
+
+**Status of the implementation rule:** `async_endpoint_confirmed`. First-party document, route
+live, credential authorized, request and response shapes verified by a real write. What the
+endpoint does **not** provide — optimistic-concurrency guards, a `FAILED` state, cancel, listing,
+or per-row success detail beyond `{id, sku}` — is the design input for adopting it.

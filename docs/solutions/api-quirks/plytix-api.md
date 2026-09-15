@@ -486,8 +486,12 @@ Notes:
 
 - `POST /api/v1/bulk/products` `{action:"update", products:[{id|sku, data:{label?, status?, attributes:{…}}}]}`
   — up to **1,000 products per job**; returns a job record (`state: "QUEUED"`).
-- `GET /api/v1/bulk/products/<job_id>` — `status`, `summary {ok, error}`, per-sku
+- `GET /api/v1/bulk/products/<job_id>` — `status` (`"In progress"` → `"Finished"`, Title-case),
+  `summary {ok, error, cancelled}` (string counters), `products [{id, sku}]`, per-sku
   `errors[{sku, errors:[{<label>: msg}]}]`.
+- **`Finished` is reported before `summary`/`products` are filled in.** Treat the job as done
+  only when the three counters sum to the rows you submitted, or read the products back.
+- Small jobs complete in ~1 s; the submit returns `state: "CREATED"` immediately.
 - Path is singular `bulk`, resource after. Job status is **not** under `/api/v1/jobs` (that
   family is separately permission-gated). Not on apidocs.plytix.com; source is a 2021 Plytix
   draft PDF in `plytix-mcp/docs/features/batch-update/`. See REST-EVIDENCE.md there.
