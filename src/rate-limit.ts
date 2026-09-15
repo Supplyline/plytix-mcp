@@ -1,9 +1,10 @@
 /**
  * Plytix rate-limit handling shared by the stdio and Worker clients.
  *
- * Plytix enforces two account-level windows (50 req / 10 s and 5 000 req / h on the
- * accounts we have seen) and advertises them only in the auth JWT
- * (`user_claims.account.rate_limit`) and in the JSON body of a 429 — never in
+ * Plytix enforces two account-level windows (50 req / 10 s, and an hourly cap that is
+ * per-plan — 5 000 on the Supplyline account until 2026-09-15, 15 000 since — which is why
+ * it is read from the JWT at runtime rather than hard-coded) and advertises them only in the
+ * auth JWT (`user_claims.account.rate_limit`) and in the JSON body of a 429 — never in
  * `x-ratelimit-*` response headers. So pacing has to be proactive (token bucket) and
  * backoff has to be schedule-driven, with the body's `ttl` / a `Retry-After` header as
  * a floor when present.
@@ -160,7 +161,8 @@ export function parseRateLimitSpec(spec: string | undefined): RateLimitConfig | 
 
 /**
  * Bucket configs derived from JWT windows: every window at RATE_LIMIT_SHARE, tightest first.
- * Both windows matter — 40 / 10 s alone would allow 14 400 / h against a 5 000 / h cap.
+ * Both windows matter — 40 / 10 s alone would allow 14 400 / h, which exceeded the hourly cap
+ * this account had until 2026-09-15 (5 000) and still leaves no headroom under the current 15 000.
  */
 export function rateLimitConfigsFromWindows(windows: RateLimitWindow[]): RateLimitConfig[] {
   return windows

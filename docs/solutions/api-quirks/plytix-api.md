@@ -466,8 +466,9 @@ Notes:
 
 ## 16a. Rate limits (verified live 2026-09-01)
 
-- Two account-level windows, both enforced: **50 requests / 10 s** and **5,000 requests / hour**
-  (Supplyline account; other plans may differ). They are advertised only in the auth JWT:
+- Two account-level windows, both enforced: **50 requests / 10 s** and **15,000 requests / hour**
+  (Supplyline account, hourly cap raised from 5,000 by Plytix CSM on 2026-09-15 — confirmed live
+  in the JWT the same day; other plans may differ). They are advertised only in the auth JWT:
   `user_claims.account.rate_limit: [{limit, window_size}, …]` (`window_size` in seconds).
 - Plytix sends **no `x-ratelimit-*` response headers** on v1 or v2. A 429 carries the limit in
   its JSON body: `{"message":"API rate limit exceeded","limit":50,"window_size":10}`, sometimes
