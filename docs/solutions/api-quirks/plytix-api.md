@@ -481,6 +481,16 @@ Notes:
   wait longer than 15 s. Retries are logged as JSON lines (`plytix.retry`,
   `plytix.retry_aborted`) on stderr (stdio) / `console.warn` (Worker).
 
+## 16b. Bulk product update (first-party draft doc, confirmed live 2026-09-15)
+
+- `POST /api/v1/bulk/products` `{action:"update", products:[{id|sku, data:{label?, status?, attributes:{…}}}]}`
+  — up to **1,000 products per job**; returns a job record (`state: "QUEUED"`).
+- `GET /api/v1/bulk/products/<job_id>` — `status`, `summary {ok, error}`, per-sku
+  `errors[{sku, errors:[{<label>: msg}]}]`.
+- Path is singular `bulk`, resource after. Job status is **not** under `/api/v1/jobs` (that
+  family is separately permission-gated). Not on apidocs.plytix.com; source is a 2021 Plytix
+  draft PDF in `plytix-mcp/docs/features/batch-update/`. See REST-EVIDENCE.md there.
+
 ## 17. Minimal working sequence
 
 1. Authenticate.

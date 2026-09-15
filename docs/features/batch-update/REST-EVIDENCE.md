@@ -45,3 +45,46 @@ search tools make). No write-method probing was performed.
   enabled** (Plytix settings or support) before any async implementation could even poll.
 - Per the implementation rule above, an undocumented permission-gated route is NOT
   `async_endpoint_confirmed`. **Conclusion remains `use_patch_loop`.**
+
+## Addendum 2026-09-15 — first-party bulk documentation received; route confirmed live
+
+**Source:** `plytix-bulk-actions-draft-2021.pdf` (this directory), sent by Plytix CSM Eva
+Rodriguez to Eric on 2026-09-15 together with the hourly limit increase to 15,000. Title:
+"Bulk actions for public API — Draft documentation of product bulk actions", Plytix Aps 2021.
+This is the first-party evidence the implementation rule above was waiting for, with one
+caveat: it is marked **draft** and is not on apidocs.plytix.com.
+
+**What it documents:**
+
+- `POST /api/v1/bulk/products` — body `{ "action": "update", "products": [ { "id" | "sku",
+  "data": { "label"?, "status"?, "attributes": { <user attribute label>: <value> } } } ] }`.
+  Max **1,000 products per operation**. System attributes: only `label` and `status`. User
+  attributes go under `attributes` keyed by label. Multiselect = JSON array; decimals unquoted
+  with `.`; dates `yyyy-mm-dd`. Returns `200` with a job record:
+  `{ id (job_id), state: "QUEUED", by_user, created_at, modified, display_name, is_system, source }`.
+- `GET /api/v1/bulk/products/<job_id>` — job summary: `status` (`FINISHED`), `summary: { ok, error }`,
+  `products: [{id, sku}]`, and `errors: [{ sku, errors: [{ <attribute label>: <message> }] }]`.
+  Per-row, per-attribute error reporting — which the PATCH loop had to synthesize.
+
+**Why every June probe missed it:** the path is `/api/v1/bulk/products` (singular `bulk`,
+resource *after*). June guessed `/api/v2/products/bulk`, `/api/v1/bulk_actions`, and the
+`/jobs` family; today's first pass guessed `/bulks`. The job-status GET lives under the same
+`bulk/products/` prefix, **not** under `/api/v1/jobs/…` — so the 403 on `/jobs` is unrelated
+and does not block this.
+
+**Live probe, read-only, 2026-09-15 (GET only; no POST was made):**
+
+| Request | Status | Body |
+|---|---|---|
+| `GET /api/v1/bulk/products/000000000000000000000000` | 404 | `{"error":{"errors":[{"field":"id","msg":"product does not exist"}]}}` |
+| `GET /api/v1/bulk/products` | 422 | `ProductsBulkApi.get() missing 1 required positional argument: 'job_id'` |
+| `GET /api/v1/bulk` | 404 | generic route-miss |
+
+The 404 is a handler response for an unknown id, and the 422 names the handler class — the
+route family exists and **this credential is authorized** (contrast the 403 on `/api/v1/jobs`).
+
+**Status of the implementation rule:** first-party + route live + credential authorized →
+this is sufficient to move from `use_patch_loop` toward `async_endpoint_confirmed`, **pending
+one controlled write** (a single product, one attribute, value already equal to the live value)
+to confirm the draft's request/response shape against the current API. Not run in this session;
+needs Eric's go-ahead and a target SKU.
