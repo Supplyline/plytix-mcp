@@ -18,6 +18,7 @@
  */
 
 import type {
+  BatchUpdateErrorDetail,
   BatchUpdateFailure,
   BatchUpdateItem,
   BatchUpdateMetadata,
@@ -31,7 +32,6 @@ import type {
   BulkUpdateResult,
 } from '../types.js';
 import {
-  detectDuplicateInputs,
   finishedResult,
   getBatchItemKey,
   rejectedResult,
@@ -46,8 +46,29 @@ export const BULK_MAX_ITEMS = 1000;
  * result. Kept under a typical MCP client timeout; `products_bulk_status` picks up from there.
  */
 export const BULK_DEFAULT_WAIT_TIMEOUT_MS = 45_000;
+/** Hard ceiling on any wait, whatever the caller asks for. Polling is a subrequest each time. */
+export const BULK_MAX_WAIT_TIMEOUT_MS = 120_000;
+/**
+ * Ceiling on the serialized request body for one job. The server's own limit is unknown;
+ * a 620-row manifest measured ~1.5 MB, so this leaves room without letting a 32 MB manifest
+ * through as a single POST.
+ */
+export const BULK_MAX_BODY_BYTES = 8 * 1024 * 1024;
 /** Poll spacing: quick first look, then back off to a 2 s cadence. */
 const POLL_SCHEDULE_MS = [500, 1000, 2000];
+
+/** Thrown when the submit call fails; `ambiguous` is false only for a 429 (nothing queued). */
+export class BulkSubmitError extends Error {
+  readonly status?: number;
+  readonly ambiguous: boolean;
+  constructor(message: string, public readonly cause: unknown) {
+    super(message);
+    this.name = 'BulkSubmitError';
+    const status = (cause as { status?: unknown })?.status;
+    this.status = typeof status === 'number' ? status : undefined;
+    this.ambiguous = this.status !== 429;
+  }
+}
 
 export interface BulkUpdateOperations {
   submitBulkProductUpdate(rows: BulkProductRow[]): Promise<BulkJobRecord>;
@@ -80,8 +101,6 @@ export interface PollBulkJobOptions extends ClockOptions {
   metadata?: BatchUpdateMetadata;
   /** The submitted items, so failures/successes can carry the caller's row index. */
   items?: BatchUpdateItem[];
-  /** Status from the submit response, reported if we never poll. */
-  initialStatus?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -123,7 +142,9 @@ function classifyStatus(status: string | undefined | null): StatusClass {
 }
 
 /**
- * true  — terminal, and every submitted row is accounted for.
+ * true  — every submitted row is accounted for by the counters (whatever the status string
+ *         says — Plytix's vocabulary has already drifted from its own draft doc, so the
+ *         counters are the stronger signal), or the job ended in a failure state.
  * false — not yet (still running, or "Finished" with counters lagging).
  * null  — finished but `submitted` is unknown, so completeness cannot be judged.
  */
@@ -133,10 +154,12 @@ export function isBulkJobSettled(
 ): boolean | null {
   const cls = classifyStatus(summary.status);
   if (cls === 'failed') return true;
-  if (cls !== 'finished') return false;
-  if (submitted === undefined) return null;
-  const c = normalizeCounters(summary);
-  return c.ok + c.error + c.cancelled >= submitted;
+  if (submitted !== undefined) {
+    const c = normalizeCounters(summary);
+    if (c.ok + c.error + c.cancelled >= submitted) return true;
+    return false;
+  }
+  return cls === 'finished' ? null : false;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -146,12 +169,14 @@ export function isBulkJobSettled(
 function indexMaps(items: BatchUpdateItem[] | undefined) {
   const bySku = new Map<string, number>();
   const byId = new Map<string, number>();
+  // Plytix echoes SKUs back as stored; match tolerantly on case and surrounding whitespace.
+  const norm = (sku: string) => sku.trim().toLowerCase();
   (items ?? []).forEach((item, index) => {
-    if (item.sku && !bySku.has(item.sku)) bySku.set(item.sku, index);
+    if (item.sku && !bySku.has(norm(item.sku))) bySku.set(norm(item.sku), index);
     if (item.product_id && !byId.has(item.product_id)) byId.set(item.product_id, index);
   });
   const lookup = (sku: string | undefined, id: string | undefined): number => {
-    if (sku !== undefined && bySku.has(sku)) return bySku.get(sku) as number;
+    if (sku !== undefined && bySku.has(norm(sku))) return bySku.get(norm(sku)) as number;
     if (id !== undefined && byId.has(id)) return byId.get(id) as number;
     return -1;
   };
@@ -164,11 +189,14 @@ function failuresFromSummary(
 ): BatchUpdateFailure[] {
   return (summary.errors ?? []).map((row) => {
     const index = maps.lookup(row.sku, row.id);
-    const errors = (row.errors ?? []).flatMap((entry) =>
+    const errors: BatchUpdateErrorDetail[] = (row.errors ?? []).flatMap((entry) =>
       Object.entries(entry ?? {}).map(([field, msg]) => ({ field, msg: String(msg) }))
     );
+    if (index === -1 && !row.sku && !row.id) {
+      errors.push({ msg: 'Plytix did not identify which row this error belongs to' });
+    }
     return {
-      key: row.sku ?? row.id ?? 'unknown',
+      key: row.sku ?? row.id ?? 'unattributed',
       index,
       ...(row.id ? { product_id: row.id } : {}),
       stage: 'bulk' as const,
@@ -202,9 +230,26 @@ function buildResult(args: {
   const counters = normalizeCounters(snapshot);
   const maps = indexMaps(args.items);
   const failures = failuresFromSummary(snapshot, maps);
+  const errorRows = failures.length;
   const total = args.submitted ?? counters.ok + counters.error + counters.cancelled;
   const jobFailed = classifyStatus(snapshot.status) === 'failed';
 
+  // `summary` counts ROWS and is reconciled with the server counters: the errors[] list can
+  // lag the counters just as products[] does. Diagnostic rows below carry index -1 and are
+  // reported in failures[] but never counted as rows.
+  const failed = Math.max(errorRows, counters.error);
+  if (counters.error > errorRows) {
+    failures.push({
+      key: args.jobId,
+      index: -1,
+      stage: 'bulk',
+      errors: [
+        {
+          msg: `Plytix counts ${counters.error} failed row(s) but has detailed ${errorRows}; re-poll products_bulk_status for the rest`,
+        },
+      ],
+    });
+  }
   if (jobFailed) {
     const accounted = counters.ok + counters.error + counters.cancelled;
     failures.push({
@@ -222,9 +267,9 @@ function buildResult(args: {
   const summary: BatchUpdateSummary = {
     total,
     succeeded: counters.ok,
-    failed: failures.length,
-    // Rows the server never processed are skipped; otherwise only explicit cancellations are.
-    skipped: jobFailed ? Math.max(0, total - counters.ok - counters.error) : counters.cancelled,
+    failed,
+    // On a failed job every unprocessed row is skipped; otherwise only explicit cancellations.
+    skipped: jobFailed ? Math.max(0, total - counters.ok - failed) : counters.cancelled,
   };
   const job: BulkJobInfo = {
     id: args.jobId,
@@ -266,7 +311,7 @@ export async function pollBulkJob(
 ): Promise<BulkUpdateResult> {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
-  const budget = options.waitTimeoutMs ?? BULK_DEFAULT_WAIT_TIMEOUT_MS;
+  const budget = Math.min(options.waitTimeoutMs ?? BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_WAIT_TIMEOUT_MS);
   const started = now();
   const common = {
     submitted: options.submitted,
@@ -336,16 +381,20 @@ export async function executeBulkUpdate(
   input: unknown,
   options: ExecuteBulkUpdateOptions
 ): Promise<BulkUpdateResult> {
-  const validation: BatchValidationOptions = { maxItems: options.maxItems, maxBytes: options.maxBytes };
+  // validateBatchItems also enforces the per-batch item cap and rejects duplicate inputs.
+  const validation: BatchValidationOptions = {
+    maxItems: Math.min(options.maxItems, BULK_MAX_ITEMS),
+    maxBytes: Math.min(options.maxBytes ?? BULK_MAX_BODY_BYTES, BULK_MAX_BODY_BYTES),
+  };
   const total = Array.isArray(input) ? input.length : 0;
   const { items, failures } = validateBatchItems(input, validation);
-  const allFailures = [...failures, ...detectGuards(input)];
+  const allFailures = [...failures, ...detectGuards(input)].map((f) =>
+    f.errors.some((e) => /max is \d+$/.test(e.msg) && e.field === 'items' && /items;/.test(e.msg))
+      ? { ...f, errors: f.errors.map((e) => ({ ...e, msg: `${e.msg}; split into jobs of at most ${BULK_MAX_ITEMS} rows` })) }
+      : f
+  );
   if (allFailures.length > 0) {
     return rejectedResult(total, allFailures, options.metadata);
-  }
-  const duplicates = detectDuplicateInputs(items);
-  if (duplicates.length > 0) {
-    return rejectedResult(total, duplicates, options.metadata);
   }
 
   const rows = toBulkRows(items);
@@ -361,7 +410,21 @@ export async function executeBulkUpdate(
     }) as BulkUpdateResult;
   }
 
-  const job = await ops.submitBulkProductUpdate(rows);
+  let job: BulkJobRecord;
+  try {
+    job = await ops.submitBulkProductUpdate(rows);
+  } catch (error) {
+    // A 429 means Plytix did not process the request. Anything else after the request was
+    // sent (5xx, timeout, connection reset) is ambiguous: the job MAY have been created and
+    // there is no job-listing endpoint to check. Say so, loudly, instead of inviting a rerun.
+    const status = (error as { status?: unknown })?.status;
+    const detail = error instanceof Error ? error.message : String(error);
+    const message =
+      status === 429
+        ? `bulk submit was rate limited and nothing was queued: ${detail}`
+        : `bulk submit failed after the request was sent — the job MAY still have been created on Plytix; do not resubmit these ${rows.length} rows without checking the products first: ${detail}`;
+    throw new BulkSubmitError(message, error);
+  }
 
   if (options.wait === false) {
     return {
@@ -386,7 +449,6 @@ export async function executeBulkUpdate(
     waitTimeoutMs: options.waitTimeoutMs,
     returnSuccesses: options.returnSuccesses,
     metadata: options.metadata,
-    initialStatus: job.state ?? null,
     now: options.now,
     sleep: options.sleep,
   });

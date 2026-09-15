@@ -22,7 +22,7 @@ import {
   STDIO_INLINE_MAX_ITEMS,
 } from '../batch/helpers.js';
 import { readBatchManifest } from '../batch/manifest.js';
-import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS } from '../batch/bulk.js';
+import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BULK_MAX_WAIT_TIMEOUT_MS } from '../batch/bulk.js';
 import {
   STDIO_EXPORT_INLINE_MAX_BYTES,
   STDIO_EXPORT_INLINE_MAX_ROWS,
@@ -814,7 +814,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_bulk_update',
     {
       title: 'Bulk Update Products (async job)',
-      description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status.`,
+      description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with anything other than a rate limit, the job MAY still have been created — check the products before resubmitting.`,
       inputSchema: {
         items: z
           .array(batchUpdateItemSchema)
@@ -832,7 +832,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .int()
           .positive()
           .optional()
-          .describe(`Max time to wait for the job to settle (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})`),
+          .describe(`Max time to wait for the job to settle (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS}, hard cap ${BULK_MAX_WAIT_TIMEOUT_MS})`),
         return_successes: z.boolean().optional().describe('Include one success row per updated product'),
       },
     },
@@ -851,7 +851,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           const manifest = await readBatchManifest(manifest_path);
           input = manifest.items;
           metadata = manifest.metadata;
-          maxBytes = undefined; // the manifest reader already enforces its own byte cap
+          maxBytes = undefined; // core applies BULK_MAX_BODY_BYTES; the manifest reader has its own file cap
         }
         const result = await client.bulkUpdateProducts(input, {
           maxItems: BULK_MAX_ITEMS,
@@ -895,7 +895,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_bulk_status',
     {
       title: 'Bulk Update Job Status',
-      description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null.',
+      description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null. Failure rows from this tool carry index -1 (the original item order is not known here); match them by key.',
       inputSchema: {
         job_id: z.string().min(1).describe('Job id returned by products_bulk_update'),
         expected_total: z.number().int().positive().optional().describe('Rows submitted in the job'),

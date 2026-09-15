@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   BULK_MAX_ITEMS,
+  BULK_MAX_WAIT_TIMEOUT_MS,
+  BulkSubmitError,
   executeBulkUpdate,
   isBulkJobSettled,
   normalizeCounters,
@@ -85,6 +87,7 @@ const ITEMS = [
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -118,11 +121,14 @@ describe('normalizeCounters / isBulkJobSettled', () => {
     expect(normalizeCounters({})).toEqual({ ok: 0, error: 0, cancelled: 0 });
   });
 
-  it('is settled only when finished AND the counters account for every row', () => {
+  it('is settled only when the counters account for every row', () => {
     expect(isBulkJobSettled(summary('Finished', { ok: 0 }), 4)).toBe(false); // the live gotcha
     expect(isBulkJobSettled(summary('Finished', { ok: 3, error: 1 }), 4)).toBe(true);
-    expect(isBulkJobSettled(summary('In progress', { ok: 4 }), 4)).toBe(false);
     expect(isBulkJobSettled(summary('FINISHED', { ok: 4 }), 4)).toBe(true); // case-insensitive
+    // counters win over the status string — the vocabulary has already drifted once
+    expect(isBulkJobSettled(summary('In progress', { ok: 4 }), 4)).toBe(true);
+    expect(isBulkJobSettled(summary('Finished with errors', { ok: 3, error: 1 }), 4)).toBe(true);
+    expect(isBulkJobSettled(summary('In progress', { ok: 1 }), 4)).toBe(false);
   });
 
   it('treats a failed/cancelled job as terminal regardless of counters', () => {
@@ -132,6 +138,7 @@ describe('normalizeCounters / isBulkJobSettled', () => {
 
   it('cannot decide without a submitted count', () => {
     expect(isBulkJobSettled(summary('Finished', { ok: 4 }), undefined)).toBeNull();
+    expect(isBulkJobSettled(summary('In progress', { ok: 4 }), undefined)).toBe(false);
     expect(isBulkJobSettled(summary('Failed'), undefined)).toBe(true);
   });
 });
@@ -253,7 +260,7 @@ describe('executeBulkUpdate', () => {
       { maxItems: BULK_MAX_ITEMS, ...fakeClock() }
     );
     expect(big.status).toBe('rejected');
-    expect(big.failures[0]?.errors[0]?.msg).toMatch(/max is 1000/);
+    expect(big.failures[0]?.errors[0]?.msg).toMatch(/max is 1000; split into jobs of at most 1000 rows/);
 
     expect(ops.submitBulkProductUpdate).not.toHaveBeenCalled();
     expect(ops.getBulkProductJob).not.toHaveBeenCalled();
@@ -323,17 +330,98 @@ describe('executeBulkUpdate', () => {
     expect(result.status).toBe('finished');
     if (result.status !== 'finished') return;
     expect(result.job?.status).toBe('Failed');
-    expect(result.summary).toEqual({ total: 3, succeeded: 0, failed: 1, skipped: 3 });
+    // summary counts rows; the job-level failure is a diagnostic row (index -1), not a row count
+    expect(result.summary).toEqual({ total: 3, succeeded: 0, failed: 0, skipped: 3 });
     expect(result.failures).toEqual([
       { key: 'job-1', index: -1, stage: 'bulk', errors: [{ msg: expect.stringMatching(/job ended in status "Failed"/) }] },
     ]);
   });
 
-  it('propagates a submit failure as a thrown error (nothing was queued)', async () => {
-    const ops = makeOps([], new Error('502 upstream'));
-    await expect(
-      executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() })
-    ).rejects.toThrow('502 upstream');
+  it('flags a non-429 submit failure as ambiguous — the job may have been created', async () => {
+    const boom = Object.assign(new Error('Request failed: 502 - bad gateway'), { status: 502 });
+    const ops = makeOps([], boom);
+    const error = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BulkSubmitError);
+    expect((error as BulkSubmitError).ambiguous).toBe(true);
+    expect((error as BulkSubmitError).status).toBe(502);
+    expect((error as Error).message).toMatch(/MAY still have been created/);
+    expect((error as Error).message).toMatch(/do not resubmit these 3 rows/);
+    expect((error as Error).message).toMatch(/502 - bad gateway/);
+  });
+
+  it('a rate-limited submit is not ambiguous — nothing was queued', async () => {
+    const limited = Object.assign(new Error('429 rate limited after 4 attempts'), { status: 429 });
+    const ops = makeOps([], limited);
+    const error = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() }).catch((e: unknown) => e);
+    expect((error as BulkSubmitError).ambiguous).toBe(false);
+    expect((error as Error).message).toMatch(/nothing was queued/);
+  });
+
+  it('rejects guards in any shape, including ones validateBatchItems would reject first', async () => {
+    const ops = makeOps([]);
+    for (const guard of [{ expected_attributes: {} }, { expected_attributes: null }, { if_match: 5 }]) {
+      const result = await executeBulkUpdate(ops, [{ sku: 'A', label: 'x', ...guard }], { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
+      expect(result.status).toBe('rejected');
+    }
+    expect(ops.submitBulkProductUpdate).not.toHaveBeenCalled();
+  });
+
+  it('never lets a caller raise the item cap above the endpoint limit', async () => {
+    const ops = makeOps([]);
+    const big = await executeBulkUpdate(ops, Array.from({ length: BULK_MAX_ITEMS + 1 }, (_, i) => ({ sku: `S${i}`, label: 'x' })), { maxItems: 5000, ...fakeClock() });
+    expect(big.status).toBe('rejected');
+    expect(ops.submitBulkProductUpdate).not.toHaveBeenCalled();
+  });
+
+  it('settles on the counters even when the status string is one we have never seen', async () => {
+    const ops = makeOps([summary('Finished with errors', { ok: 2, error: 1 }, { errors: [{ sku: 'B', errors: [{ box_1: 'bad' }] }] })]);
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
+    expect(result.status).toBe('finished');
+    expect(ops.polls).toHaveLength(1);
+    expect(result.summary).toEqual({ total: 3, succeeded: 2, failed: 1, skipped: 0 });
+  });
+
+  it('a failed job that also carries error rows still sums to total', async () => {
+    const ops = makeOps([summary('Cancelled', { ok: 1, error: 1 }, { errors: [{ sku: 'B', errors: [{ box_1: 'bad' }] }] })]);
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
+    if (result.status !== 'finished') throw new Error(result.status);
+    const s = result.summary;
+    expect(s).toEqual({ total: 3, succeeded: 1, failed: 1, skipped: 1 });
+    expect(s.succeeded + s.failed + s.skipped).toBe(s.total);
+    expect(result.failures.map((f) => f.index)).toEqual([1, -1]); // the row, then the job diagnostic
+  });
+
+  it('reconciles failed with the error counter when errors[] lags, and says so', async () => {
+    const ops = makeOps([summary('Finished', { ok: 2, error: 1 })]); // counter says 1, no detail yet
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
+    if (result.status !== 'finished') throw new Error(result.status);
+    expect(result.summary).toEqual({ total: 3, succeeded: 2, failed: 1, skipped: 0 });
+    expect(result.failures).toEqual([
+      { key: 'job-1', index: -1, stage: 'bulk', errors: [{ msg: expect.stringMatching(/counts 1 failed row\(s\) but has detailed 0/) }] },
+    ]);
+  });
+
+  it('attributes server rows tolerantly by SKU case/whitespace and flags unattributable ones', async () => {
+    const ops = makeOps([
+      summary('Finished', { ok: 1, error: 2 }, {
+        products: [{ id: 'p-a', sku: ' a ' }],
+        errors: [{ sku: 'b', errors: [{ box_1: 'bad' }] }, { errors: [{ box_1: 'bad' }] }],
+      }),
+    ]);
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, returnSuccesses: true, ...fakeClock() });
+    if (result.status !== 'finished') throw new Error(result.status);
+    expect(result.successes).toEqual([{ key: ' a ', index: 0, product_id: 'p-a' }]);
+    expect(result.failures[0]).toMatchObject({ key: 'b', index: 1 });
+    expect(result.failures[1]).toMatchObject({ key: 'unattributed', index: -1 });
+    expect(result.failures[1]?.errors.map((e) => e.msg)).toContain('Plytix did not identify which row this error belongs to');
+  });
+
+  it('caps the wait budget at BULK_MAX_WAIT_TIMEOUT_MS whatever the caller asks for', async () => {
+    const ops = makeOps([summary('In progress')]);
+    const clock = fakeClock();
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, waitTimeoutMs: 3_600_000, ...clock });
+    expect(result.status).toBe('pending');
+    expect(clock.now()).toBeLessThanOrEqual(BULK_MAX_WAIT_TIMEOUT_MS);
   });
 
   it('keys success rows by sku even when the row was submitted by id', async () => {
@@ -388,10 +476,6 @@ describe('pollBulkJob', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('worker bulk-update surface', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
   const rpc = async (body: unknown) => {
     const { default: worker } = await import('../worker.js');
     const response = await worker.fetch(

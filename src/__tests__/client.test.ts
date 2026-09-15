@@ -642,7 +642,7 @@ describe('PlytixClient bulk update', () => {
     expect(result.successes).toEqual([{ key: 'A', index: 0, product_id: 'p-a' }]);
   });
 
-  it('does not replay a submit that 5xxs — the job may have been created', async () => {
+  it('does not replay a submit that 5xxs, and says the job may have been created', async () => {
     let submits = 0;
     stubFetch(authRoute(), (url, init) => {
       if (bulkUrl(url) && init?.method === 'POST') {
@@ -653,7 +653,7 @@ describe('PlytixClient bulk update', () => {
     });
 
     const client = makeClient(UNPACED);
-    await expect(client.bulkUpdateProducts([{ sku: 'A', label: 'x' }])).rejects.toMatchObject({ status: 502 });
+    await expect(client.bulkUpdateProducts([{ sku: 'A', label: 'x' }])).rejects.toMatchObject({ status: 502, ambiguous: true });
     expect(submits).toBe(1);
   });
 

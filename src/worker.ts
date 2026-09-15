@@ -16,6 +16,12 @@ import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
 import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS } from './batch/bulk.js';
+
+/** Worker wait budget: JSON-Schema `minimum` is not enforced on tools/call, so clamp here. */
+function clampWait(value: unknown): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : BULK_DEFAULT_WAIT_TIMEOUT_MS;
+  return Math.min(Math.max(n, 1), BULK_DEFAULT_WAIT_TIMEOUT_MS);
+}
 import {
   WORKER_EXPORT_INLINE_MAX_BYTES,
   WORKER_EXPORT_INLINE_MAX_ROWS,
@@ -885,7 +891,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_bulk_update',
-    description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status.`,
+    description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with anything other than a rate limit, the job MAY still have been created — check the products before resubmitting.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -916,7 +922,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_bulk_status',
-    description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null.',
+    description: 'Read a Plytix bulk job (from products_bulk_update). Pass expected_total (rows submitted) so completion can be confirmed — Plytix reports "Finished" before the summary is populated, so without it the result is a snapshot with settled: null. Failure rows from this tool carry index -1 (the original item order is not known here); match them by key.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2031,7 +2037,8 @@ const toolHandlers: Record<string, ToolHandler> = {
       maxBytes: WORKER_INLINE_MAX_BYTES,
       dryRun: args.dry_run === true,
       wait: args.wait !== false,
-      waitTimeoutMs: typeof args.wait_timeout_ms === 'number' ? args.wait_timeout_ms : undefined,
+      // Each poll is a Worker subrequest; never let a caller hold a request open past the default.
+      waitTimeoutMs: clampWait(args.wait_timeout_ms),
       returnSuccesses: args.return_successes === true,
     });
 
@@ -2045,7 +2052,7 @@ const toolHandlers: Record<string, ToolHandler> = {
     const result = await client.getBulkUpdateStatus(args.job_id as string, {
       submitted: typeof args.expected_total === 'number' ? args.expected_total : undefined,
       wait: args.wait === true,
-      waitTimeoutMs: typeof args.wait_timeout_ms === 'number' ? args.wait_timeout_ms : undefined,
+      waitTimeoutMs: clampWait(args.wait_timeout_ms),
       returnSuccesses: args.return_successes === true,
     });
 
