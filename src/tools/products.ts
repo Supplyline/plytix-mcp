@@ -814,7 +814,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     'products_bulk_update',
     {
       title: 'Bulk Update Products (async job)',
-      description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with anything other than a rate limit, the job MAY still have been created — check the products before resubmitting.`,
+      description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with a 5xx or a transport error, the job MAY still have been created — check the products before resubmitting. summary counts rows (on a job that ends in a failure state, unprocessed rows count as failed); failures[] may also carry diagnostic rows with index -1 that are not counted.`,
       inputSchema: {
         items: z
           .array(batchUpdateItemSchema)

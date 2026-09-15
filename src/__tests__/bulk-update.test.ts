@@ -4,6 +4,7 @@ import {
   BULK_MAX_WAIT_TIMEOUT_MS,
   BulkSubmitError,
   executeBulkUpdate,
+  isAmbiguousSubmitStatus,
   isBulkJobSettled,
   normalizeCounters,
   pollBulkJob,
@@ -262,6 +263,14 @@ describe('executeBulkUpdate', () => {
     expect(big.status).toBe('rejected');
     expect(big.failures[0]?.errors[0]?.msg).toMatch(/max is 1000; split into jobs of at most 1000 rows/);
 
+    const fat = await executeBulkUpdate(ops, [{ sku: 'A', attributes: { blob: 'x'.repeat(2000) } }], {
+      maxItems: BULK_MAX_ITEMS,
+      maxBytes: 1024,
+      ...fakeClock(),
+    });
+    expect(fat.status).toBe('rejected');
+    expect(fat.failures[0]?.errors[0]?.msg).toMatch(/bytes; max is 1024; submit fewer rows per job$/);
+
     expect(ops.submitBulkProductUpdate).not.toHaveBeenCalled();
     expect(ops.getBulkProductJob).not.toHaveBeenCalled();
   });
@@ -330,8 +339,8 @@ describe('executeBulkUpdate', () => {
     expect(result.status).toBe('finished');
     if (result.status !== 'finished') return;
     expect(result.job?.status).toBe('Failed');
-    // summary counts rows; the job-level failure is a diagnostic row (index -1), not a row count
-    expect(result.summary).toEqual({ total: 3, succeeded: 0, failed: 0, skipped: 3 });
+    // every unprocessed row counts as failed — a wholesale failure must never read as failed: 0
+    expect(result.summary).toEqual({ total: 3, succeeded: 0, failed: 3, skipped: 0 });
     expect(result.failures).toEqual([
       { key: 'job-1', index: -1, stage: 'bulk', errors: [{ msg: expect.stringMatching(/job ended in status "Failed"/) }] },
     ]);
@@ -347,6 +356,33 @@ describe('executeBulkUpdate', () => {
     expect((error as Error).message).toMatch(/MAY still have been created/);
     expect((error as Error).message).toMatch(/do not resubmit these 3 rows/);
     expect((error as Error).message).toMatch(/502 - bad gateway/);
+  });
+
+  it('a definitive 4xx rejection is not ambiguous either, but a timeout is', async () => {
+    expect(isAmbiguousSubmitStatus(422)).toBe(false);
+    expect(isAmbiguousSubmitStatus(401)).toBe(false);
+    expect(isAmbiguousSubmitStatus(408)).toBe(true);
+    expect(isAmbiguousSubmitStatus(502)).toBe(true);
+    expect(isAmbiguousSubmitStatus(undefined)).toBe(true);
+    const rejected = Object.assign(new Error('Request failed: 422 - bad label'), { status: 422 });
+    const error = await executeBulkUpdate(makeOps([], rejected), ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() }).catch((e: unknown) => e);
+    expect((error as BulkSubmitError).ambiguous).toBe(false);
+    expect((error as BulkSubmitError).safeMessage).toBe('bulk submit was rejected (HTTP 422); nothing was queued');
+    expect((error as Error).message).toMatch(/nothing was queued: Request failed: 422 - bad label$/);
+    expect((error as BulkSubmitError).safeMessage).not.toMatch(/bad label/); // no upstream body
+  });
+
+  it('flags a counter/error-row disagreement instead of letting the summary silently exceed total', async () => {
+    const ops = makeOps([
+      summary('Finished', { ok: 2, error: 1 }, {
+        errors: [{ sku: 'A', errors: [{ x: 'a' }] }, { sku: 'B', errors: [{ x: 'b' }] }], // 2 rows, counter says 1
+      }),
+    ]);
+    const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
+    if (result.status !== 'finished') throw new Error(result.status);
+    expect(result.summary).toEqual({ total: 3, succeeded: 2, failed: 2, skipped: 0 });
+    expect(result.failures.at(-1)).toMatchObject({ key: 'job-1', index: -1 });
+    expect(result.failures.at(-1)?.errors[0]?.msg).toMatch(/do not reconcile with the 3 rows submitted/);
   });
 
   it('a rate-limited submit is not ambiguous — nothing was queued', async () => {
@@ -386,7 +422,8 @@ describe('executeBulkUpdate', () => {
     const result = await executeBulkUpdate(ops, ITEMS, { maxItems: BULK_MAX_ITEMS, ...fakeClock() });
     if (result.status !== 'finished') throw new Error(result.status);
     const s = result.summary;
-    expect(s).toEqual({ total: 3, succeeded: 1, failed: 1, skipped: 1 });
+    // 1 ok, 1 detailed error, 1 never processed (counts as failed on a cancelled job)
+    expect(s).toEqual({ total: 3, succeeded: 1, failed: 2, skipped: 0 });
     expect(s.succeeded + s.failed + s.skipped).toBe(s.total);
     expect(result.failures.map((f) => f.index)).toEqual([1, -1]); // the row, then the job diagnostic
   });
@@ -510,6 +547,35 @@ describe('worker bulk-update surface', () => {
     expect(body.result.isError).toBe(true);
     expect(payload.status).toBe('rejected');
     expect(JSON.stringify(payload.failures)).toContain('max is 1000');
+  });
+
+  it('clampWait: absent or nonsensical → default; oversized → default ceiling', async () => {
+    const { clampWait } = await import('../worker.js');
+    const { BULK_DEFAULT_WAIT_TIMEOUT_MS } = await import('../batch/bulk.js');
+    for (const v of [undefined, null, 'x', NaN, Infinity, 0, -5, 0.5]) expect(clampWait(v)).toBe(BULK_DEFAULT_WAIT_TIMEOUT_MS);
+    expect(clampWait(90_000)).toBe(BULK_DEFAULT_WAIT_TIMEOUT_MS);
+    expect(clampWait(1500.9)).toBe(1500);
+  });
+
+  it('surfaces the "job may have been created" guidance to remote callers without the upstream body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('auth')) return new Response(JSON.stringify({ data: [{ access_token: 'hdr.e30.sig', expires_in: 900 }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        if (url.endsWith('/api/v1/bulk/products') && init?.method === 'POST') return new Response('<html>upstream secret body</html>', { status: 502 });
+        throw new Error(`unexpected fetch ${url}`);
+      })
+    );
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const body = await rpc({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'products_bulk_update', arguments: { items: [{ sku: 'A', label: 'x' }] } } });
+    err.mockRestore();
+    const text = body.result.content?.[0]?.text ?? '';
+    expect(body.result.isError).toBe(true);
+    expect(text).toMatch(/MAY still have been created/);
+    expect(text).toMatch(/do not resubmit these 1 rows/);
+    expect(text).toMatch(/HTTP 502/);
+    expect(text).not.toMatch(/upstream secret body/);
   });
 
   it('rejects guarded items before any Plytix call', async () => {

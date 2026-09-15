@@ -15,12 +15,14 @@ import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
-import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS } from './batch/bulk.js';
+import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BulkSubmitError } from './batch/bulk.js';
 
 /** Worker wait budget: JSON-Schema `minimum` is not enforced on tools/call, so clamp here. */
-function clampWait(value: unknown): number {
-  const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : BULK_DEFAULT_WAIT_TIMEOUT_MS;
-  return Math.min(Math.max(n, 1), BULK_DEFAULT_WAIT_TIMEOUT_MS);
+export function clampWait(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) {
+    return BULK_DEFAULT_WAIT_TIMEOUT_MS; // absent or nonsensical → the default, never "1 ms"
+  }
+  return Math.min(Math.floor(value), BULK_DEFAULT_WAIT_TIMEOUT_MS);
 }
 import {
   WORKER_EXPORT_INLINE_MAX_BYTES,
@@ -127,6 +129,12 @@ const ALLOWED_ORIGINS = [
 ];
 
 function clientSafeError(error: unknown): string {
+  // A failed bulk submit may have created the job anyway; that guidance must reach the
+  // caller. `safeMessage` is written without the upstream body, so it is safe to surface.
+  if (error instanceof BulkSubmitError) {
+    console.error('[plytix-mcp] upstream error:', error);
+    return error.status !== undefined ? `${error.safeMessage} (HTTP ${error.status})` : error.safeMessage;
+  }
   // PlytixError carries the upstream HTTP status and the raw upstream body in its message.
   // Surface only a generic, status-based message to callers; log the full detail server-side.
   if (error && typeof error === 'object' && 'status' in error) {
@@ -891,7 +899,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_bulk_update',
-    description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with anything other than a rate limit, the job MAY still have been created — check the products before resubmitting.`,
+    description: `Submit up to ${BULK_MAX_ITEMS} product updates as ONE Plytix bulk job and (by default) wait for it to settle. No optimistic-concurrency guards: expected_attributes / if_match are rejected — use products_batch_update when a guard is needed. A job is reported settled only when its ok+error+cancelled counters account for every row (Plytix reports "Finished" before the summary is populated). If the wait budget runs out, the result is status "pending" with a job_id for products_bulk_status. If the submit itself fails with a 5xx or a transport error, the job MAY still have been created — check the products before resubmitting. summary counts rows (on a job that ends in a failure state, unprocessed rows count as failed); failures[] may also carry diagnostic rows with index -1 that are not counted.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -914,7 +922,7 @@ const TOOLS: ToolDefinition[] = [
         },
         dry_run: { type: 'boolean', description: 'Validate and count without submitting (no network call)' },
         wait: { type: 'boolean', description: 'Poll the job until settled (default true). false returns pending with the job_id immediately.' },
-        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Max time to wait for the job to settle (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})` },
+        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Max time to wait for the job to settle (default and ceiling on this surface: ${BULK_DEFAULT_WAIT_TIMEOUT_MS} ms; larger values are clamped)` },
         return_successes: { type: 'boolean', description: 'Include one success row per updated product' },
       },
       required: ['items'],
@@ -929,7 +937,7 @@ const TOOLS: ToolDefinition[] = [
         job_id: { type: 'string', description: 'Job id returned by products_bulk_update' },
         expected_total: { type: 'integer', minimum: 1, description: 'Rows submitted in the job' },
         wait: { type: 'boolean', description: 'Keep polling until settled or the budget runs out (default false)' },
-        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Wait budget when wait is true (default ${BULK_DEFAULT_WAIT_TIMEOUT_MS})` },
+        wait_timeout_ms: { type: 'integer', minimum: 1, description: `Wait budget when wait is true (default and ceiling on this surface: ${BULK_DEFAULT_WAIT_TIMEOUT_MS} ms; larger values are clamped)` },
         return_successes: { type: 'boolean', description: 'Include one success row per updated product' },
       },
       required: ['job_id'],

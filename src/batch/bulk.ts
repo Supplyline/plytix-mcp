@@ -11,7 +11,10 @@
  *
  * 1. The job reports `status: "Finished"` BEFORE its summary and product list are
  *    populated. A caller that stops at "Finished" sees `ok: 0` on a fully successful job.
- *    So "settled" here means finished AND the counters account for every submitted row.
+ *    So "settled" here is decided by the COUNTERS: the job is done when ok+error+cancelled
+ *    account for every submitted row, whatever the status string says (the status
+ *    vocabulary has already drifted from Plytix's own draft doc). A failure-class status is
+ *    terminal on its own. The status string is reported, never trusted for completion.
  * 2. There is no optimistic-concurrency guard. A bulk job writes over whatever is live.
  *    Items that carry `expected_attributes` / `if_match` are rejected up front rather than
  *    silently stripped — use `products_batch_update` when a guard is needed.
@@ -57,17 +60,34 @@ export const BULK_MAX_BODY_BYTES = 8 * 1024 * 1024;
 /** Poll spacing: quick first look, then back off to a 2 s cadence. */
 const POLL_SCHEDULE_MS = [500, 1000, 2000];
 
-/** Thrown when the submit call fails; `ambiguous` is false only for a 429 (nothing queued). */
+/**
+ * Thrown when the submit call fails. `ambiguous` means the request may have reached Plytix
+ * and created the job anyway (5xx, timeout, connection reset): there is no job-listing
+ * endpoint, so the caller must check the products before resubmitting. A 429 (not
+ * processed) or a definitive 4xx rejection is not ambiguous.
+ *
+ * `safeMessage` carries the guidance WITHOUT the upstream response body, for surfaces that
+ * must not echo raw upstream text to remote callers (the Worker's error sanitizer).
+ */
 export class BulkSubmitError extends Error {
   readonly status?: number;
   readonly ambiguous: boolean;
-  constructor(message: string, public readonly cause: unknown) {
-    super(message);
+  readonly safeMessage: string;
+  constructor(safeMessage: string, detail: string, public readonly cause: unknown) {
+    super(detail ? `${safeMessage}: ${detail}` : safeMessage);
     this.name = 'BulkSubmitError';
+    this.safeMessage = safeMessage;
     const status = (cause as { status?: unknown })?.status;
     this.status = typeof status === 'number' ? status : undefined;
-    this.ambiguous = this.status !== 429;
+    this.ambiguous = isAmbiguousSubmitStatus(this.status);
   }
+}
+
+/** 429 → not processed; other 4xx (bar 408) → rejected before any job existed; else unknown. */
+export function isAmbiguousSubmitStatus(status: number | undefined): boolean {
+  if (status === undefined) return true; // transport failure: could have reached the server
+  if (status === 408) return true;
+  return !(status >= 400 && status < 500);
 }
 
 export interface BulkUpdateOperations {
@@ -236,8 +256,12 @@ function buildResult(args: {
 
   // `summary` counts ROWS and is reconciled with the server counters: the errors[] list can
   // lag the counters just as products[] does. Diagnostic rows below carry index -1 and are
-  // reported in failures[] but never counted as rows.
-  const failed = Math.max(errorRows, counters.error);
+  // reported in failures[] but never counted as rows. On a job that ended in a failure
+  // state, every row the server never processed counts as failed too — a wholesale failure
+  // must never read as `failed: 0`.
+  const failedRows = Math.max(errorRows, counters.error);
+  const unprocessed = jobFailed ? Math.max(0, total - counters.ok - failedRows - counters.cancelled) : 0;
+  const failed = failedRows + unprocessed;
   if (counters.error > errorRows) {
     failures.push({
       key: args.jobId,
@@ -268,9 +292,20 @@ function buildResult(args: {
     total,
     succeeded: counters.ok,
     failed,
-    // On a failed job every unprocessed row is skipped; otherwise only explicit cancellations.
-    skipped: jobFailed ? Math.max(0, total - counters.ok - failed) : counters.cancelled,
+    skipped: counters.cancelled,
   };
+  if (args.settled === true && summary.succeeded + summary.failed + summary.skipped !== total) {
+    failures.push({
+      key: args.jobId,
+      index: -1,
+      stage: 'bulk',
+      errors: [
+        {
+          msg: `Plytix's counters (ok ${counters.ok}, error ${counters.error}, cancelled ${counters.cancelled}) and its ${errorRows} detailed error row(s) do not reconcile with the ${total} rows submitted; verify the products directly`,
+        },
+      ],
+    });
+  }
   const job: BulkJobInfo = {
     id: args.jobId,
     status: snapshot.status ?? null,
@@ -388,11 +423,19 @@ export async function executeBulkUpdate(
   };
   const total = Array.isArray(input) ? input.length : 0;
   const { items, failures } = validateBatchItems(input, validation);
-  const allFailures = [...failures, ...detectGuards(input)].map((f) =>
-    f.errors.some((e) => /max is \d+$/.test(e.msg) && e.field === 'items' && /items;/.test(e.msg))
-      ? { ...f, errors: f.errors.map((e) => ({ ...e, msg: `${e.msg}; split into jobs of at most ${BULK_MAX_ITEMS} rows` })) }
-      : f
-  );
+  const withGuidance = (msg: string): string => {
+    if (/^batch has \d+ items; max is \d+$/.test(msg)) {
+      return `${msg}; split into jobs of at most ${BULK_MAX_ITEMS} rows`;
+    }
+    if (/^inline payload is \d+ bytes; max is \d+$/.test(msg)) {
+      return `${msg}; submit fewer rows per job`;
+    }
+    return msg;
+  };
+  const allFailures = [...failures, ...detectGuards(input)].map((f) => ({
+    ...f,
+    errors: f.errors.map((e) => ({ ...e, msg: withGuidance(e.msg) })),
+  }));
   if (allFailures.length > 0) {
     return rejectedResult(total, allFailures, options.metadata);
   }
@@ -417,13 +460,16 @@ export async function executeBulkUpdate(
     // A 429 means Plytix did not process the request. Anything else after the request was
     // sent (5xx, timeout, connection reset) is ambiguous: the job MAY have been created and
     // there is no job-listing endpoint to check. Say so, loudly, instead of inviting a rerun.
-    const status = (error as { status?: unknown })?.status;
+    const rawStatus = (error as { status?: unknown })?.status;
+    const status = typeof rawStatus === 'number' ? rawStatus : undefined;
     const detail = error instanceof Error ? error.message : String(error);
-    const message =
+    const safe =
       status === 429
-        ? `bulk submit was rate limited and nothing was queued: ${detail}`
-        : `bulk submit failed after the request was sent — the job MAY still have been created on Plytix; do not resubmit these ${rows.length} rows without checking the products first: ${detail}`;
-    throw new BulkSubmitError(message, error);
+        ? 'bulk submit was rate limited; nothing was queued'
+        : !isAmbiguousSubmitStatus(status)
+          ? `bulk submit was rejected (HTTP ${status}); nothing was queued`
+          : `bulk submit failed after the request was sent — the job MAY still have been created on Plytix; do not resubmit these ${rows.length} rows without checking the products first`;
+    throw new BulkSubmitError(safe, detail, error);
   }
 
   if (options.wait === false) {
