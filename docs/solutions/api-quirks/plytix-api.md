@@ -421,8 +421,13 @@ dropdown/multiselect**. A 215-attribute account is 3 requests at `page_size` 100
 
 Common type classes:
 
-- `TextAttribute`
-- `MultilineAttribute`
+- `TextAttribute` — "Plain Text" in the UI; covers the former Short text *and* Paragraph
+- `MultilineAttribute` — **retired**. Plytix merged Paragraph into Plain Text (`TextAttribute`).
+  Since 2026-09-21 an attribute created with `type_class: "MultilineAttribute"` is accepted but
+  comes back as `TextAttribute`; from the per-account data migration on 2026-09-28 no attribute
+  carries this value, so a search filter on it returns nothing. Filter on `TextAttribute`
+  instead. This server never branched on the distinction (only `DropdownAttribute` /
+  `MultiSelectAttribute` drive validation), so nothing in it needed to change.
 - `HtmlAttribute`
 - `IntAttribute`
 - `DecimalAttribute`
@@ -434,6 +439,10 @@ Common type classes:
 - `MediaAttribute`
 - `MediaGalleryAttribute`
 - `CompletenessAttribute`
+
+**Cache lag across the 2026-09-28 migration:** the stdio client caches attribute rows for
+5 minutes and the worker caches per request, so a session straddling the migration can see
+the old `MultilineAttribute` value for at most one cache window. Nothing to do; it self-heals.
 
 Patchable fields:
 
