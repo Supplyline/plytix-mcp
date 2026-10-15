@@ -5,6 +5,7 @@ import type {
   BatchUpdateMetadata,
   BatchUpdateResult,
   BatchUpdateSuccess,
+  BatchUpdateSummary,
 } from '../types.js';
 import { PlytixError, type RateLimitHit } from '../types.js';
 import { MAX_RATE_RETRIES, backoffDelayMs } from '../rate-limit.js';
@@ -353,7 +354,7 @@ export function rejectedResult(
   total: number,
   failures: BatchUpdateFailure[],
   metadata?: BatchUpdateMetadata
-): BatchUpdateResult {
+): Extract<BatchUpdateResult, { status: 'rejected' }> {
   return {
     status: 'rejected',
     summary: {
@@ -369,6 +370,16 @@ export function rejectedResult(
   };
 }
 
+/** The plain finished shape; the runner adds `partial`, `unwritten` and pacing on top. */
+export interface FinishedBatchResult {
+  status: 'finished';
+  dry_run?: boolean;
+  summary: BatchUpdateSummary;
+  failures: BatchUpdateFailure[];
+  successes?: BatchUpdateSuccess[];
+  metadata?: BatchUpdateMetadata;
+}
+
 export function finishedResult(args: {
   total: number;
   succeeded: number;
@@ -377,7 +388,7 @@ export function finishedResult(args: {
   dryRun?: boolean;
   successes?: BatchUpdateSuccess[];
   metadata?: BatchUpdateMetadata;
-}): BatchUpdateResult {
+}): FinishedBatchResult {
   return {
     status: 'finished',
     ...(args.dryRun ? { dry_run: true } : {}),

@@ -440,6 +440,9 @@ export class WorkerPlytixClient {
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
+      dryRunLiveGapMs: options.dryRunLiveGapMs,
+      now: options.now,
+      sleep: options.sleep,
     });
   }
 

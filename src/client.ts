@@ -303,6 +303,9 @@ export class PlytixClient {
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
+      dryRunLiveGapMs: options.dryRunLiveGapMs ?? dryRunLiveGapFromEnv(),
+      now: options.now,
+      sleep: options.sleep,
     });
   }
 
@@ -1007,4 +1010,11 @@ export class PlytixClient {
   async call<T = unknown>(path: string, init: RequestInit = {}): Promise<PlytixResult<T>> {
     return this.request<T>(path, init);
   }
+}
+
+/** `PLYTIX_DRY_RUN_LIVE_GAP_MS` (a non-negative integer) overrides the runner default. */
+function dryRunLiveGapFromEnv(): number | undefined {
+  const raw = process.env.PLYTIX_DRY_RUN_LIVE_GAP_MS;
+  if (raw === undefined || !/^\d+$/.test(raw.trim())) return undefined;
+  return Number(raw.trim());
 }

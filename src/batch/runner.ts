@@ -47,6 +47,59 @@ export interface ExecuteBatchUpdateOptions {
   concurrency?: number;
   requestDelayMs?: number;
   returnSuccesses?: boolean;
+  /**
+   * Minimum gap between a dry run and the live submit of the identical items through the same
+   * client. The dry run's guard reads and the live run's guard reads plus PATCHes otherwise land
+   * in one 10 s window and 429 the tail of the batch. Default DEFAULT_DRY_RUN_LIVE_GAP_MS.
+   */
+  dryRunLiveGapMs?: number;
+  /** Test seams. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** 12 s: past one full 50 req / 10 s window, the gap sessions kept having to add by hand. */
+export const DEFAULT_DRY_RUN_LIVE_GAP_MS = 12_000;
+const DRY_RUN_MEMORY_LIMIT = 50;
+const DEFERRED_MSG =
+  'not started: an earlier row exhausted the account rate window; resubmit this row unchanged';
+
+/** Dry runs per client (the stdio server keeps one client for its lifetime). */
+const dryRunMemory = new WeakMap<object, Map<string, number>>();
+
+/** FNV-1a over the serialized items: identical items, identical fingerprint. */
+export function itemsFingerprint(items: unknown): string {
+  const text = JSON.stringify(items) ?? '';
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${text.length}:${hash.toString(16)}`;
+}
+
+function isRateLimited(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    'status' in error &&
+    (error as { status?: unknown }).status === 429
+  );
+}
+
+/** Shared by every row of one call: the first exhausted 429 stops new rows from starting. */
+interface RunState {
+  halted: boolean;
+}
+
+function deferredFailure(row: ReadyRow): BatchUpdateFailure {
+  return {
+    index: row.index,
+    key: row.key,
+    product_id: row.productId,
+    stage: 'deferred',
+    errors: [{ msg: DEFERRED_MSG }],
+  };
 }
 
 interface ReadyRow {
@@ -73,6 +126,18 @@ export async function executeBatchUpdate(
   const items = validation.items;
   const skus = Array.from(new Set(items.map((item) => item.sku).filter(Boolean) as string[]));
 
+  const now = options.now ?? Date.now;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const run: RunState = { halted: false };
+  const unwrittenIndexes = new Set<number>();
+  const fingerprint = itemsFingerprint(items);
+  let memory = dryRunMemory.get(ops);
+  if (!memory) {
+    memory = new Map();
+    dryRunMemory.set(ops, memory);
+  }
+
   let resolution = new Map<string, ResolvedProductRef[]>();
   let resolutionError: unknown;
   if (skus.length > 0) {
@@ -92,6 +157,7 @@ export async function executeBatchUpdate(
 
     if (item.sku) {
       if (resolutionError) {
+        if (isRateLimited(resolutionError)) unwrittenIndexes.add(index);
         failures.push({
           index,
           key,
@@ -172,30 +238,54 @@ export async function executeBatchUpdate(
               requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
             },
             (row) =>
-              runTransientRetry(() => checkRowGuard(ops, row)).catch(
-                (error): BatchUpdateFailure => ({
-                  index: row.index,
-                  key: row.key,
-                  product_id: row.productId,
-                  stage: 'read',
-                  errors: parsePlytixErrors(error),
-                })
-              )
+              run.halted
+                ? Promise.resolve(deferredFailure(row))
+                : runTransientRetry(() => checkRowGuard(ops, row)).catch(
+                    (error): BatchUpdateFailure => {
+                      if (isRateLimited(error)) run.halted = true;
+                      return {
+                        index: row.index,
+                        key: row.key,
+                        product_id: row.productId,
+                        stage: 'read',
+                        errors: parsePlytixErrors(error),
+                      };
+                    }
+                  )
           )
         : [];
     const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
     const dryRunFailures = [...failures, ...guardFailures];
+    memory.set(fingerprint, now());
+    while (memory.size > DRY_RUN_MEMORY_LIMIT) {
+      memory.delete(memory.keys().next().value as string);
+    }
 
-    return finishedResult({
-      total,
-      succeeded: 0,
-      failures: dryRunFailures,
-      // Failed rows are not also "skipped": skipped counts only the rows that
-      // would have been patched, so failed + skipped === total in a dry run.
-      skipped: total - dryRunFailures.length,
-      dryRun: true,
-      metadata: options.metadata,
-    });
+    return {
+      ...finishedResult({
+        total,
+        succeeded: 0,
+        failures: dryRunFailures,
+        // Failed rows are not also "skipped": skipped counts only the rows that
+        // would have been patched, so failed + skipped === total in a dry run.
+        skipped: total - dryRunFailures.length,
+        dryRun: true,
+        metadata: options.metadata,
+      }),
+      would_patch: total - dryRunFailures.length,
+    };
+  }
+
+  // A live submit of items dry-run moments ago through this client waits out the window first.
+  let pacedMs = 0;
+  const dryRunAt = memory.get(fingerprint);
+  const gapMs = options.dryRunLiveGapMs ?? DEFAULT_DRY_RUN_LIVE_GAP_MS;
+  if (dryRunAt !== undefined) {
+    const wait = gapMs - (now() - dryRunAt);
+    if (wait > 0) {
+      pacedMs = Math.round(wait);
+      await sleep(wait);
+    }
   }
 
   const patchResults = await runWithConcurrency(
@@ -204,7 +294,7 @@ export async function executeBatchUpdate(
       concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
       requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
     },
-    (row) => patchRowWithRetry(ops, row)
+    (row) => patchRowWithRetry(ops, row, undefined, run)
   );
 
   const patchFailures = patchResults
@@ -217,20 +307,37 @@ export async function executeBatchUpdate(
       result?.status === 'success'
     )
     .map((result) => result.success);
+  for (const result of patchResults) {
+    if (result?.status === 'failure' && result.unwritten) unwrittenIndexes.add(result.failure.index);
+  }
   const allFailures = [...failures, ...patchFailures];
-  // Rows whose guard read failed (transport) or drifted (conflict) never reached PATCH.
+  // Rows whose guard read failed (transport), drifted (conflict) or never started (deferred)
+  // never reached PATCH.
   const conflictFailures = patchFailures.filter(
-    (failure) => failure.stage === 'conflict' || failure.stage === 'read'
+    (failure) =>
+      failure.stage === 'conflict' || failure.stage === 'read' || failure.stage === 'deferred'
   );
+  const succeeded = readyRows.length - patchFailures.length;
+  const unwritten = allFailures
+    .filter((failure) => unwrittenIndexes.has(failure.index))
+    .sort((a, b) => a.index - b.index)
+    .map((failure) => ({ index: failure.index, key: failure.key }));
 
-  return finishedResult({
+  const result = finishedResult({
     total,
-    succeeded: readyRows.length - patchFailures.length,
+    succeeded,
     failures: allFailures,
     skipped: failures.length + conflictFailures.length,
     ...(options.returnSuccesses ? { successes } : {}),
     metadata: options.metadata,
   });
+  return {
+    ...result,
+    // Some rows patched and some did not: say so in the status, not only in the counts.
+    ...(succeeded > 0 && allFailures.length > 0 ? { status: 'partial' as const } : {}),
+    ...(unwritten.length > 0 ? { unwritten } : {}),
+    ...(pacedMs > 0 ? { paced_ms: pacedMs } : {}),
+  } as BatchUpdateResult;
 }
 
 async function checkRowGuard(
@@ -339,23 +446,35 @@ function isComparableObject(value: unknown): value is Record<string, unknown> {
 
 type PatchRowResult =
   | { status: 'success'; success: BatchUpdateSuccess }
-  | { status: 'failure'; failure: BatchUpdateFailure };
+  | { status: 'failure'; failure: BatchUpdateFailure; unwritten?: boolean };
 
 async function patchRowWithRetry(
   ops: BatchUpdateOperations,
   row: ReadyRow,
-  retries?: number
+  retries?: number,
+  run: RunState = { halted: false }
 ): Promise<PatchRowResult> {
-  const failure = (stage: 'read' | 'patch', errors: BatchUpdateFailure['errors']): PatchRowResult => ({
+  const failure = (
+    stage: 'read' | 'patch',
+    errors: BatchUpdateFailure['errors'],
+    unwritten: boolean
+  ): PatchRowResult => ({
     status: 'failure',
     failure: { index: row.index, key: row.key, product_id: row.productId, stage, errors },
+    unwritten,
   });
+
+  if (run.halted) {
+    return { status: 'failure', failure: deferredFailure(row), unwritten: true };
+  }
 
   let guardFailure: BatchUpdateFailure | undefined;
   try {
     guardFailure = await runTransientRetry(() => checkRowGuard(ops, row), { retries });
   } catch (error) {
-    return failure('read', parsePlytixErrors(error));
+    // The guard read precedes the PATCH, so a failed read wrote nothing.
+    if (isRateLimited(error)) run.halted = true;
+    return failure('read', parsePlytixErrors(error), true);
   }
   if (guardFailure) {
     return { status: 'failure', failure: guardFailure };
@@ -369,14 +488,19 @@ async function patchRowWithRetry(
       mutation: true,
     });
   } catch (error) {
-    return failure('patch', parsePlytixErrors(error));
+    // A 429 means Plytix did not process the PATCH; any other error may have applied it.
+    const rateLimited = isRateLimited(error);
+    if (rateLimited) run.halted = true;
+    return failure('patch', parsePlytixErrors(error), rateLimited);
   }
 
   const updated = result.data?.[0];
   if (!updated?.id) {
-    return failure('patch', [
-      { msg: `Product update returned no confirmed product for ${row.productId}` },
-    ]);
+    return failure(
+      'patch',
+      [{ msg: `Product update returned no confirmed product for ${row.productId}` }],
+      false
+    );
   }
   return {
     status: 'success',

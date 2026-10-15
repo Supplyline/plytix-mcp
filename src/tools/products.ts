@@ -9,6 +9,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
 import type {
+  BatchUpdateResult,
   PlytixProduct,
   ProductBatchExportInput,
   ProductBatchExportToFileInput,
@@ -21,7 +22,7 @@ import {
   STDIO_INLINE_MAX_BYTES,
   STDIO_INLINE_MAX_ITEMS,
 } from '../batch/helpers.js';
-import { readBatchManifest } from '../batch/manifest.js';
+import { readBatchManifest, writeBatchReceipt } from '../batch/manifest.js';
 import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BULK_MAX_WAIT_TIMEOUT_MS } from '../batch/bulk.js';
 import {
   STDIO_EXPORT_INLINE_MAX_BYTES,
@@ -752,6 +753,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     manifest_path: string;
     dry_run?: boolean;
     return_successes?: boolean;
+    write_receipt?: boolean;
   }>(
     server,
     'products_batch_update_manifest',
@@ -768,17 +770,35 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .boolean()
           .optional()
           .describe('Include one success row per patched product for exact caller ledger updates'),
+        write_receipt: z
+          .boolean()
+          .optional()
+          .describe('Write the result next to the manifest as <manifest>.receipt.<dry-run|live>.<time>.json (default true)'),
       },
     },
-    async ({ manifest_path, dry_run, return_successes }) => {
+    async ({ manifest_path, dry_run, return_successes, write_receipt }) => {
       try {
         const manifest = await readBatchManifest(manifest_path);
-        const result = await client.batchUpdateProducts(manifest.items, {
+        const result: BatchUpdateResult = await client.batchUpdateProducts(manifest.items, {
           dryRun: dry_run === true,
           returnSuccesses: return_successes === true,
           maxItems: MANIFEST_MAX_ITEMS,
           metadata: manifest.metadata,
         });
+        if (write_receipt !== false) {
+          try {
+            const receiptPath = await writeBatchReceipt(manifest_path, result, {
+              dryRun: dry_run === true,
+              manifestSha256: manifest.metadata.manifest_sha256,
+            });
+            Object.assign(result, { receipt_path: receiptPath });
+          } catch (error) {
+            // The write already happened (or not); a missing receipt must not hide its result.
+            Object.assign(result, {
+              receipt_error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
 
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

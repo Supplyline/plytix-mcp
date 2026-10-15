@@ -144,7 +144,9 @@ export type BatchUpdateFailureStage =
   | 'read'
   | 'conflict'
   | 'patch'
-  | 'bulk';
+  | 'bulk'
+  /** Never started: an earlier row exhausted the account rate window. Nothing was read or written. */
+  | 'deferred';
 
 export interface BatchUpdateErrorDetail {
   field?: string;
@@ -187,11 +189,27 @@ export type BatchUpdateResult =
       metadata?: BatchUpdateMetadata;
     }
   | {
-      status: 'finished';
+      /**
+       * `partial`: a live run where some rows were patched and some were not. Never a normal
+       * outcome: resubmit the `unwritten` rows unchanged and reconcile the rest.
+       */
+      status: 'finished' | 'partial';
       dry_run?: boolean;
       summary: BatchUpdateSummary;
       failures: BatchUpdateFailure[];
       successes?: BatchUpdateSuccess[];
+      /** Dry run only: rows that would be patched (all guards and resolutions passed). */
+      would_patch?: number;
+      /**
+       * Live only: rows that were never patched because of a 429, a failed guard read or a
+       * deferral. Safe to resubmit byte-identical; every other failure needs a decision.
+       */
+      unwritten?: Array<{ index: number; key: string }>;
+      /** Milliseconds this live submit waited after the dry run of the identical items. */
+      paced_ms?: number;
+      /** Stdio manifest tool: where the receipt for this call was written, or why it was not. */
+      receipt_path?: string;
+      receipt_error?: string;
       metadata?: BatchUpdateMetadata;
     };
 

@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-15
+
+### Changed
+- **A partial landing says so.** A live batch where some rows were patched and some were not now
+  returns `status: "partial"` instead of `"finished"`, plus `unwritten`: the rows that were never
+  patched (a 429, a failed guard read, or a row never started) and are safe to resubmit
+  unchanged. Other failures stay out of `unwritten`: a non-429 PATCH error may have applied, a
+  conflict needs fresh guards, a not-found SKU needs a fix.
+- **An exhausted 429 halts the batch.** Once a row's guard read or PATCH runs out of 429 retries,
+  rows not yet started are reported as the new `stage: "deferred"` without making a request, on
+  dry runs and live runs alike. Before, every remaining row fired into the blown window and failed
+  on its own, landing an interleaved subset.
+- **A dry run and its live submit are paced.** A live submit of items identical to a dry run made
+  through the same client waits until 12 s have passed since that dry run (`paced_ms` reports the
+  wait). The dry run's guard reads and the live run's reads plus PATCHes otherwise share one
+  50 requests per 10 s window. Override with `PLYTIX_DRY_RUN_LIVE_GAP_MS` (stdio) or the runner's
+  `dryRunLiveGapMs`.
+- Dry runs report `would_patch` explicitly; `skipped` alone was being read as "nothing happened".
+- `products_batch_update_manifest` writes its result next to the manifest as
+  `<manifest>.receipt.<dry-run|live>.<time>.json` (schema `plytix-batch-receipt/1`, never
+  overwritten; `write_receipt: false` turns it off) and reports `receipt_path`.
+- The stdio server's version comes from `package.json`; the hand-edited constant had stayed at
+  0.3.3 through 0.4.0.
+
+### Note
+- The stdio server runs from the gitignored `dist/`. A checkout updated without
+  `npm run build` keeps serving the old code: in October 2026 every session was still running an
+  8 August build without the 0.3.4 pacing and retry. Rebuild after every pull, then restart the
+  MCP clients.
+
 ## [0.4.0] - 2026-09-15
 
 ### Added

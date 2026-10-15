@@ -232,9 +232,13 @@ describe('executeBatchUpdate', () => {
       { maxItems: 250, requestDelayMs: 0 }
     );
 
-    expect(result.status).toBe('finished');
+    // One row patched and two did not: a partial landing says so in its status.
+    expect(result.status).toBe('partial');
     expect(result.summary).toEqual({ total: 3, succeeded: 1, failed: 2, skipped: 1 });
     expect(result.failures.map((failure) => failure.stage)).toEqual(['resolve', 'patch']);
+    // Neither failure is a transient non-write (not found; a 422 that may need a fix), so no
+    // row is offered for a blind resubmit.
+    expect('unwritten' in result).toBe(false);
     expect(result.failures[1]?.errors[0]).toEqual({
       field: 'attributes.google_detail',
       msg: 'too long',
@@ -807,17 +811,26 @@ describe('authorized catalog corrections', () => {
     const items = [{ sku: 'BWI-C600', product_id: 'product-1',
       attributes: { series_name: 'C600' },
       expected_attributes: { series_name: 'C-600', org_id: 'BWI' } }];
-    const preview = await executeBatchUpdate(ops, items, { maxItems: 20, dryRun: true });
+    let clock = 1_000_000;
+    const sleep = vi.fn(async (ms: number) => {
+      clock += ms;
+    });
+    const timing = { now: () => clock, sleep };
+    const preview = await executeBatchUpdate(ops, items, { maxItems: 20, dryRun: true, ...timing });
     expect(preview.failures).toHaveLength(0);
     expect(ops.updateProduct).not.toHaveBeenCalled();
-    const result = await executeBatchUpdate(ops, items, { maxItems: 20 });
+    clock += 2_000;
+    const result = await executeBatchUpdate(ops, items, { maxItems: 20, ...timing });
+    // The live submit of the identical items waited out the rest of the dry-run gap.
+    expect(sleep).toHaveBeenCalledWith(10_000);
+    expect(result).toMatchObject({ status: 'finished', paced_ms: 10_000 });
     expect(result.summary.succeeded).toBe(1);
     expect(ops.updateProduct).toHaveBeenCalledWith('product-1', { attributes: { series_name: 'C600' } });
     // Mandatory caller-owned independent readback, separate from PATCH receipt.
     const readback = await ops.getProduct('product-1');
     expect(readback.data[0].attributes).toEqual({ series_name: 'C600', org_id: 'BWI' });
     // An old manifest cannot replay after the value changes.
-    const replay = await executeBatchUpdate(ops, items, { maxItems: 20 });
+    const replay = await executeBatchUpdate(ops, items, { maxItems: 20, ...timing });
     expect(replay.failures).toHaveLength(1);
     expect(ops.updateProduct).toHaveBeenCalledTimes(1);
   });
