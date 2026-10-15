@@ -186,6 +186,9 @@ export type BatchUpdateResult =
       status: 'rejected';
       summary: BatchUpdateSummary;
       failures: BatchUpdateFailure[];
+      /** Stdio manifest tool: a rejected call still writes its receipt. */
+      receipt_path?: string;
+      receipt_error?: string;
       metadata?: BatchUpdateMetadata;
     }
   | {

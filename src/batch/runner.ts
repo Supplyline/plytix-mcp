@@ -274,9 +274,14 @@ export async function executeBatchUpdate(
         : [];
     const guardFailures = guardResults.filter(Boolean) as BatchUpdateFailure[];
     const dryRunFailures = [...failures, ...guardFailures];
-    memory.set(fingerprint, now());
-    while (memory.size > DRY_RUN_MEMORY_LIMIT) {
-      memory.delete(memory.keys().next().value as string);
+    // Remember only a dry run that spent requests (SKU resolution or guard reads): a
+    // request-free dry run used no window, so its live submit has nothing to wait out.
+    if (skus.length > 0 || guardRows.length > 0) {
+      memory.delete(fingerprint); // re-insert so eviction stays least-recently-used
+      memory.set(fingerprint, now());
+      while (memory.size > DRY_RUN_MEMORY_LIMIT) {
+        memory.delete(memory.keys().next().value as string);
+      }
     }
 
     return {

@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwritten; `write_receipt: false` turns it off) and reports `receipt_path`.
 - The stdio server's version comes from `package.json`; the hand-edited constant had stayed at
   0.3.3 through 0.4.0.
+- `npm run build` now stamps `dist/BUILD_INFO.json` (`postbuild`): the git tree hash of `src/` it
+  was compiled from (`src_tree`), the commit, whether `src/` had uncommitted changes, and the
+  version. A consumer proves the running build current by comparing `src_tree` with
+  `git rev-parse HEAD:src`, without trusting file times.
 
 ### Note
 - The stdio server runs from the gitignored `dist/`. A checkout updated without

@@ -266,6 +266,28 @@ describe('dry run to live pacing', () => {
     expect('paced_ms' in late).toBe(false);
   });
 
+  it('does not pace after a dry run that made no requests', async () => {
+    const t = clockAt(11_000_000);
+    const o = ops({ ids: [] });
+    const items = [{ product_id: 'P1', attributes: { list_price: 2 } }]; // no SKU, no guard
+    await executeBatchUpdate(o, items, { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    await executeBatchUpdate(o, items, { maxItems: 20, requestDelayMs: 0, ...t });
+    expect(t.sleep).not.toHaveBeenCalled();
+  });
+
+  it('keeps a repeated dry run fresh when the memory evicts', async () => {
+    const t = clockAt(12_000_000);
+    const o = ops({ ids: [] });
+    for (let i = 0; i < 50; i += 1) {
+      await executeBatchUpdate(o, [guarded(`S${i}`)], { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    }
+    // repeat the oldest, then add one new fingerprint: the repeat must survive eviction
+    await executeBatchUpdate(o, [guarded('S0')], { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    await executeBatchUpdate(o, [guarded('NEW')], { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    const live = await executeBatchUpdate(o, [guarded('S0')], { maxItems: 20, requestDelayMs: 0, ...t });
+    expect('paced_ms' in live && live.paced_ms).toBe(DEFAULT_DRY_RUN_LIVE_GAP_MS);
+  });
+
   it('fingerprints identical items identically and different items differently', () => {
     expect(itemsFingerprint([guarded('A')])).toBe(itemsFingerprint([guarded('A')]));
     expect(itemsFingerprint([guarded('A')])).not.toBe(itemsFingerprint([guarded('B')]));
@@ -306,5 +328,23 @@ describe('server version', () => {
   it('comes from package.json, not a hand-edited constant', () => {
     const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
     expect(VERSION).toBe(pkg.version);
+  });
+});
+
+describe('build stamp', () => {
+  it('records the source tree hash dist/ was compiled from', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const dir = await mkdtemp(join(tmpdir(), 'plytix-stamp-'));
+    try {
+      const out = join(dir, 'BUILD_INFO.json');
+      execFileSync('node', ['scripts/stamp-build.mjs'], { env: { ...process.env, PLYTIX_MCP_STAMP_OUT: out } });
+      const info = JSON.parse(await readFile(out, 'utf-8'));
+      const tree = execFileSync('git', ['rev-parse', 'HEAD:src'], { encoding: 'utf8' }).trim();
+      expect(info).toMatchObject({ schema: 'plytix-mcp-build/1', src_tree: tree });
+      expect(typeof info.src_dirty).toBe('boolean');
+      expect(info.version).toBe(JSON.parse(readFileSync('package.json', 'utf-8')).version);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
