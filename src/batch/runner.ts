@@ -138,6 +138,19 @@ export async function executeBatchUpdate(
     dryRunMemory.set(ops, memory);
   }
 
+  // A live submit of items dry-run moments ago through this client waits out the window first,
+  // before ANY live request: SKU resolution included, or it meets the window the dry run used.
+  let pacedMs = 0;
+  const dryRunAt = memory.get(fingerprint);
+  const gapMs = options.dryRunLiveGapMs ?? DEFAULT_DRY_RUN_LIVE_GAP_MS;
+  if (!options.dryRun && dryRunAt !== undefined) {
+    const wait = gapMs - (now() - dryRunAt);
+    if (wait > 0) {
+      pacedMs = Math.round(wait);
+      await sleep(wait);
+    }
+  }
+
   let resolution = new Map<string, ResolvedProductRef[]>();
   let resolutionError: unknown;
   if (skus.length > 0) {
@@ -145,6 +158,8 @@ export async function executeBatchUpdate(
       resolution = await ops.resolveProductIdsBySku(skus);
     } catch (error) {
       resolutionError = error;
+      // An exhausted 429 here blew the window for the product-ID rows too: defer them.
+      if (isRateLimited(error)) run.halted = true;
     }
   }
 
@@ -157,7 +172,10 @@ export async function executeBatchUpdate(
 
     if (item.sku) {
       if (resolutionError) {
-        if (isRateLimited(resolutionError)) unwrittenIndexes.add(index);
+        // The resolution request failed at the transport, so no row behind it was read or
+        // written: every one is safe to resubmit. (Not-found and ambiguous SKUs are results,
+        // not errors, and stay out of `unwritten`.)
+        unwrittenIndexes.add(index);
         failures.push({
           index,
           key,
@@ -274,18 +292,6 @@ export async function executeBatchUpdate(
       }),
       would_patch: total - dryRunFailures.length,
     };
-  }
-
-  // A live submit of items dry-run moments ago through this client waits out the window first.
-  let pacedMs = 0;
-  const dryRunAt = memory.get(fingerprint);
-  const gapMs = options.dryRunLiveGapMs ?? DEFAULT_DRY_RUN_LIVE_GAP_MS;
-  if (dryRunAt !== undefined) {
-    const wait = gapMs - (now() - dryRunAt);
-    if (wait > 0) {
-      pacedMs = Math.round(wait);
-      await sleep(wait);
-    }
   }
 
   const patchResults = await runWithConcurrency(

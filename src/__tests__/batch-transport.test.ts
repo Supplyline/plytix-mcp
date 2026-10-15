@@ -32,6 +32,7 @@ function ops(args: {
   resolveError?: unknown;
 }): BatchUpdateOperations & {
   getProduct: ReturnType<typeof vi.fn>;
+  resolveProductIdsBySku: ReturnType<typeof vi.fn>;
   updateProduct: ReturnType<typeof vi.fn>;
 } {
   return {
@@ -168,6 +169,28 @@ describe('an exhausted 429 halts the batch', () => {
     expect(o.getProduct.mock.calls.map((c) => c[0])).not.toContain('id-B');
   });
 
+  it('a non-429 transport failure while resolving SKUs also leaves those rows unwritten', async () => {
+    const o = ops({ ids: [], resolveError: new PlytixError('Request failed: 503 - unavailable', 503) });
+    const result = await executeBatchUpdate(o, [guarded('A')], { maxItems: 20, requestDelayMs: 0 });
+    expect('unwritten' in result && result.unwritten?.map((u) => u.key)).toEqual(['A']);
+  });
+
+  it('a resolution 429 defers the product-ID rows instead of reading into the blown window', async () => {
+    const o = ops({ ids: [], resolveError: rateLimited() });
+    const byId = { product_id: 'P1', attributes: { list_price: 2 }, expected_attributes: { list_price: 1 } };
+    const result = await executeBatchUpdate(o, [guarded('A'), byId], {
+      maxItems: 20,
+      requestDelayMs: 0,
+    });
+    expect(result.failures.map((f) => [f.key, f.stage])).toEqual([
+      ['A', 'resolve'],
+      ['P1', 'deferred'],
+    ]);
+    expect(o.getProduct).not.toHaveBeenCalled();
+    expect(o.updateProduct).not.toHaveBeenCalled();
+    expect('unwritten' in result && result.unwritten?.map((u) => u.key)).toEqual(['A', 'P1']);
+  });
+
   it('a 429 while resolving SKUs leaves every row unwritten', async () => {
     const o = ops({ ids: [], resolveError: rateLimited() });
     const result = await executeBatchUpdate(o, [guarded('A'), guarded('B')], {
@@ -197,6 +220,36 @@ describe('dry run to live pacing', () => {
     const result = await executeBatchUpdate(o, items, { maxItems: 20, requestDelayMs: 0, ...t });
     expect(t.sleep).toHaveBeenCalledWith(DEFAULT_DRY_RUN_LIVE_GAP_MS - 3_000);
     expect(result).toMatchObject({ status: 'finished', paced_ms: DEFAULT_DRY_RUN_LIVE_GAP_MS - 3_000 });
+  });
+
+  it('never paces a dry run, even right after another dry run of the same items', async () => {
+    const o = ops({ ids: [] });
+    const t = clockAt(8_000_000);
+    const items = [guarded('A')];
+    await executeBatchUpdate(o, items, { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    const again = await executeBatchUpdate(o, items, { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    expect(t.sleep).not.toHaveBeenCalled();
+    expect('paced_ms' in again).toBe(false);
+  });
+
+  it('paces before the live SKU resolution, not after it', async () => {
+    const o = ops({ ids: [] });
+    const t = clockAt(7_000_000);
+    const order: string[] = [];
+    t.sleep.mockImplementation(async (ms: number) => {
+      order.push('sleep');
+      t.advance(ms);
+    });
+    const resolve = o.resolveProductIdsBySku.getMockImplementation()!;
+    o.resolveProductIdsBySku.mockImplementation(async (skus: string[]) => {
+      order.push('resolve');
+      return resolve(skus);
+    });
+    const items = [guarded('A')];
+    await executeBatchUpdate(o, items, { maxItems: 20, dryRun: true, requestDelayMs: 0, ...t });
+    order.length = 0;
+    await executeBatchUpdate(o, items, { maxItems: 20, requestDelayMs: 0, ...t });
+    expect(order).toEqual(['sleep', 'resolve']);
   });
 
   it('does not wait once the gap has passed, for other items, for another client, or at gap 0', async () => {
