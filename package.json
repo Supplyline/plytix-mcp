@@ -1,6 +1,6 @@
 {
   "name": "plytix-mcp-server",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "MCP server for Plytix PIM API integration. Enables AI assistants to read, write, and manage product data, assets, categories, and relationships.",
   "keywords": [
@@ -47,7 +47,8 @@
     "test:integration": "node test-integration.js",
     "test:mcp": "node test-mcp-client.js",
     "test:worker": "node test-worker.js",
-    "test:all": "npm run build && npm run test && npm run test:integration && npm run test:mcp"
+    "test:all": "npm run build && npm run test && npm run test:integration && npm run test:mcp",
+    "postbuild": "node scripts/stamp-build.mjs"
   },
   "engines": {
     "node": ">=20"

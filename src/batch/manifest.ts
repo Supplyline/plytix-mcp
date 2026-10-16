@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { stat, readFile } from 'node:fs/promises';
+import { stat, readFile, writeFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import type { BatchUpdateItem, BatchUpdateMetadata } from '../types.js';
 import { MANIFEST_MAX_BYTES } from './helpers.js';
@@ -61,4 +61,44 @@ export async function readBatchManifest(manifestPath: string): Promise<BatchMani
     items: obj.items as BatchUpdateItem[],
     metadata,
   };
+}
+
+export const RECEIPT_SCHEMA = 'plytix-batch-receipt/1';
+
+/**
+ * Write the tool result next to its manifest, so a caller's ledger reads what the tool returned
+ * instead of a hand-copied summary (Seametrics landing run, 2026-09-26). Never overwrites: a
+ * receipt name already taken gets a numeric suffix. Returns the path written.
+ */
+export async function writeBatchReceipt(
+  manifestPath: string,
+  result: unknown,
+  options: { dryRun: boolean; manifestSha256?: string; now?: Date }
+): Promise<string> {
+  const at = options.now ?? new Date();
+  const stamp = at.toISOString().replace(/[:.]/g, '-');
+  const base = manifestPath.replace(/\.json$/i, '');
+  const body = `${JSON.stringify(
+    {
+      schema: RECEIPT_SCHEMA,
+      manifest_path: manifestPath,
+      ...(options.manifestSha256 ? { manifest_sha256: options.manifestSha256 } : {}),
+      dry_run: options.dryRun,
+      written_at: at.toISOString(),
+      result,
+    },
+    null,
+    2
+  )}\n`;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const suffix = attempt === 0 ? '' : `-${attempt}`;
+    const path = `${base}.receipt.${options.dryRun ? 'dry-run' : 'live'}.${stamp}${suffix}.json`;
+    try {
+      await writeFile(path, body, { flag: 'wx' });
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error;
+    }
+  }
+  throw new Error('could not find a free receipt file name');
 }
