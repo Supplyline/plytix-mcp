@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All eight tools are shared between stdio and the Worker through `src/schema-write-ops.ts`;
   the Worker reads `PLYTIX_MCP_MAX_DELETES` from its `[vars]` binding.
 
+### Changed
+- zod 3 → 4 (GHSA-mrhx-c7xc-m3w5 flagged every 3.x); the MCP SDK already accepted both. The only
+  source change is `z.record(value)` → `z.record(z.string(), value)`. Lockfile bumps for the
+  body-parser and fast-uri advisories that appeared after 0.4.1.
+
 ### Fixed
 - `variants_list`, `products_get_full` and the new `products_delete` read a parent's variants from
   `GET /api/v1/products/:id/variants`. The v2 path both clients used answers GET with 405, so

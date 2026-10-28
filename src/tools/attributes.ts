@@ -468,7 +468,7 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
           .optional()
           .describe('Options to remove (products using them lose that value)'),
         renamed_options: z
-          .record(z.string().min(1))
+          .record(z.string().min(1), z.string().min(1))
           .optional()
           .describe('Map of old option value -> new value; products keep their selection'),
         attributes: z

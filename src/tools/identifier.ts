@@ -112,7 +112,7 @@ export function registerIdentifierTools(server: McpServer) {
       inputSchema: {
         identifier: z.string().describe('The identifier to match'),
         product_data: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .describe('Product data object with fields to check (sku, label, gtin, attributes.mpn, etc.)'),
         fields: z
           .array(z.string())

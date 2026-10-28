@@ -111,7 +111,7 @@ export function registerVariantTools(server: McpServer, client: PlytixClient) {
         sku: z.string().min(1).describe('SKU for the new variant'),
         label: z.string().optional().describe('Optional label for the new variant'),
         attributes: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe('Optional attributes to set or override on the variant'),
       },

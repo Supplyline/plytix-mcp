@@ -35,9 +35,9 @@ const batchUpdateItemSchema = z.object({
   product_id: z.string().min(1).optional(),
   label: z.string().optional(),
   status: z.string().optional(),
-  attributes: z.record(z.unknown()).optional(),
-  expected_attributes: z.record(z.unknown()).optional(),
-  if_match: z.record(z.unknown()).optional(),
+  attributes: z.record(z.string(), z.unknown()).optional(),
+  expected_attributes: z.record(z.string(), z.unknown()).optional(),
+  if_match: z.record(z.string(), z.unknown()).optional(),
 });
 
 const batchExportShape = {
@@ -549,7 +549,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         label: z.string().optional().describe('Product label/name'),
         status: z.string().optional().describe('Product status'),
         attributes: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe('Custom attributes as key-value pairs (use attribute labels as keys)'),
         category_ids: z
@@ -630,7 +630,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         label: z.string().optional().describe('New product label/name'),
         status: z.string().optional().describe('New product status'),
         attributes: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe('Attributes to update (use attribute labels as keys, null to clear)'),
       },
