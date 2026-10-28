@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-28
+
+### Added
+- **Attribute definitions.** `attributes_create` (every Plytix type; options, sorting, family
+  links, completeness tracking), `attributes_update` (name, description, and incremental
+  dropdown/multiselect option edits: `add_options`, `remove_options`, `renamed_options`, or a
+  full `options` list) and `attributes_delete` (gated; surfaces Plytix's 409 usage report).
+- **Category tree.** `categories_create` (root or subcategory), `categories_update` (rename,
+  move with `parent_id`, reorder with `sort_children`), `categories_sort_root`, and
+  `categories_delete` (gated; `move_children_to` moves the direct children out first so the
+  subtree survives). Child lists are checked against the live tree before a sort is sent.
+- **Product deletion.** `products_delete` (gated). The preview lists the variants Plytix would
+  delete with the parent; `unlink_variants: true` unlinks them first so they remain as
+  standalone products. One product per call: Plytix has no bulk delete.
+- The delete gate now also refuses an execute call whose side-effect options differ from the
+  dry run, or whose target's variants/children changed in between.
+- All eight tools are shared between stdio and the Worker through `src/schema-write-ops.ts`;
+  the Worker reads `PLYTIX_MCP_MAX_DELETES` from its `[vars]` binding.
+
+### Changed
+- zod 3 → 4 (GHSA-mrhx-c7xc-m3w5 flagged every 3.x); the MCP SDK already accepted both. The only
+  source change is `z.record(value)` → `z.record(z.string(), value)`. Lockfile bumps for the
+  body-parser and fast-uri advisories that appeared after 0.4.1.
+
+### Fixed
+- `variants_list`, `products_get_full` and the new `products_delete` read a parent's variants from
+  `GET /api/v1/products/:id/variants`. The v2 path both clients used answers GET with 405, so
+  `variants_list` had been failing against the live API.
+- Both clients accept a 2xx response with an empty body (Plytix answers an attribute delete
+  with 202 and nothing else); previously that threw a JSON parse error.
+
 ## [0.4.1] - 2026-10-15
 
 ### Changed

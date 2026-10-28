@@ -16,6 +16,19 @@ import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
 import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BulkSubmitError } from './batch/bulk.js';
+import {
+  attributesCreate,
+  attributesDelete,
+  attributesUpdate,
+  categoriesCreate,
+  categoriesDelete,
+  categoriesSortRoot,
+  categoriesUpdate,
+  productsDelete,
+  type AttributesUpdateArgs,
+} from './schema-write-ops.js';
+import { ATTRIBUTE_LEVELS, ATTRIBUTE_TYPE_CLASSES, type AttributeCreateInput } from './schema-writes.js';
+import { configureDeleteCap } from './safety.js';
 
 /** Worker wait budget: JSON-Schema `minimum` is not enforced on tools/call, so clamp here. */
 export function clampWait(value: unknown): number {
@@ -74,6 +87,8 @@ interface Env {
   OAUTH_TOKEN_SECRET?: string;
   // Access-token lifetime in seconds. Default 7 days; clamped to [1 hour, 30 days].
   OAUTH_TOKEN_TTL_SECONDS?: string;
+  // Deletes one Worker isolate will perform before refusing further ones (default 3; 0 disables).
+  PLYTIX_MCP_MAX_DELETES?: string;
 }
 
 interface JsonRpcRequest {
@@ -740,6 +755,123 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'attributes_create',
+    description:
+      'Create a product attribute definition. Plytix derives the snake_case label from the name. options/manual_sorting/sort_ascending apply to DropdownAttribute and MultiSelectAttribute; attributes applies to CompletenessAttribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Display name, e.g. "Head Material"' },
+        type_class: { type: 'string', enum: [...ATTRIBUTE_TYPE_CLASSES], description: 'Attribute type' },
+        description: { type: 'string', description: 'Help text shown to editors' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Allowed values (DropdownAttribute / MultiSelectAttribute only)',
+        },
+        manual_sorting: {
+          type: 'boolean',
+          description: 'true keeps options in the given order; false sorts them alphabetically (default true)',
+        },
+        sort_ascending: {
+          type: 'boolean',
+          description: 'Sort direction when manual_sorting is false (default true)',
+        },
+        product_families: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Family ID' },
+              attribute_level: {
+                type: 'string',
+                enum: [...ATTRIBUTE_LEVELS],
+                description: 'no_level (default), parent_level or variant_level',
+              },
+            },
+            required: ['id'],
+          },
+          description: 'Families to link the new attribute to',
+        },
+        attributes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: ['string', 'null'], description: 'Attribute ID (null for system attributes such as sku)' },
+              label: { type: 'string', description: 'Attribute label' },
+            },
+            required: ['id', 'label'],
+          },
+          description: 'CompletenessAttribute only: the attributes it tracks',
+        },
+      },
+      required: ['name', 'type_class'],
+    },
+  },
+  {
+    name: 'attributes_update',
+    description:
+      'Update an attribute definition: name, description, and on dropdown/multiselect its options. Use add_options/remove_options/renamed_options to edit incrementally, or options to replace the full list. renamed_options keeps product values attached through a rename.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Attribute label (snake_case identifier)' },
+        name: { type: 'string', description: 'New display name' },
+        description: { type: 'string', description: 'New description' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Full replacement option list (cannot be combined with add_options/remove_options)',
+        },
+        add_options: { type: 'array', items: { type: 'string' }, description: 'Options to append' },
+        remove_options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Options to remove (products using them lose that value)',
+        },
+        renamed_options: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'Map of old option value -> new value; products keep their selection',
+        },
+        attributes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: ['string', 'null'], description: 'Attribute ID (null for system attributes such as sku)' },
+              label: { type: 'string', description: 'Attribute label' },
+            },
+            required: ['id', 'label'],
+          },
+          description: 'CompletenessAttribute only: replace the tracked attributes',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
+    name: 'attributes_delete',
+    description:
+      'Delete an attribute definition and every product value for it. Two-step: call with dry_run: true to get a preview and confirm_token, then call again with the token. Plytix refuses while an e-catalog, channel or PDF catalog uses the attribute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Attribute label (snake_case identifier)' },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview and get a confirm_token without deleting',
+        },
+        confirm_token: {
+          type: 'string',
+          description: 'Token from the dry run; required to execute',
+        },
+      },
+      required: ['label'],
+    },
+  },
+  {
     name: 'attributes_get_options',
     description: 'List allowed values for an attribute.',
     inputSchema: {
@@ -959,6 +1091,30 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'products_delete',
+    description:
+      'Delete one product. Two-step: call with dry_run: true to get a preview (including variants) and a confirm_token, then call again with the token. Deleting a parent deletes its variants unless unlink_variants: true, which first unlinks them into standalone products. Plytix has no bulk delete; call once per product.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product_id: { type: 'string', description: 'The product ID' },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview and get a confirm_token without deleting',
+        },
+        confirm_token: {
+          type: 'string',
+          description: 'Token from the dry run; required to execute',
+        },
+        unlink_variants: {
+          type: 'boolean',
+          description: 'Unlink variants first so they survive as standalone products (default false)',
+        },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
     name: 'assets_get',
     description: 'Get one asset by ID.',
     inputSchema: {
@@ -1097,6 +1253,76 @@ const TOOLS: ToolDefinition[] = [
         category_id: { type: 'string', description: 'The category ID to unlink' },
       },
       required: ['product_id', 'category_id'],
+    },
+  },
+  {
+    name: 'categories_create',
+    description: 'Create a product category: a root category, or a subcategory when parent_id is given.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Category name' },
+        parent_id: { type: 'string', description: 'Parent category ID (omit for a root category)' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'categories_update',
+    description:
+      'Rename a category, move it (parent_id; "" makes it a root category), or reorder its direct children (sort_children must list every child ID). parent_id and sort_children cannot be combined in one call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        category_id: { type: 'string', description: 'The category ID' },
+        name: { type: 'string', description: 'New name' },
+        parent_id: { type: 'string', description: 'New parent category ID, or "" to make it a root category' },
+        sort_children: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Every direct child ID in the desired order',
+        },
+      },
+      required: ['category_id'],
+    },
+  },
+  {
+    name: 'categories_sort_root',
+    description: 'Reorder the root-level categories. category_ids must list every root category ID exactly once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        category_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Every root category ID in the desired order',
+        },
+      },
+      required: ['category_ids'],
+    },
+  },
+  {
+    name: 'categories_delete',
+    description:
+      'Delete a category. Two-step: call with dry_run: true to get a preview (including direct children) and a confirm_token, then call again with the token. Plytix deletes the whole subtree; pass move_children_to (a category ID, or "" for root) to move the direct children out first so only this category is removed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        category_id: { type: 'string', description: 'The category ID' },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview and get a confirm_token without deleting',
+        },
+        confirm_token: {
+          type: 'string',
+          description: 'Token from the dry run; required to execute',
+        },
+        move_children_to: {
+          type: 'string',
+          description: 'Move direct children under this category ID first ("" = root) so they survive',
+        },
+      },
+      required: ['category_id'],
     },
   },
   {
@@ -2665,6 +2891,64 @@ const toolHandlers: Record<string, ToolHandler> = {
       ],
     };
   },
+
+  // ─────────────────────────────────────────────────────────────
+  // Schema writes (shared with stdio via src/schema-write-ops.ts)
+  // ─────────────────────────────────────────────────────────────
+
+  async attributes_create(args, client) {
+    return attributesCreate(client, args as unknown as AttributeCreateInput);
+  },
+
+  async attributes_update(args, client) {
+    return attributesUpdate(client, args as unknown as AttributesUpdateArgs);
+  },
+
+  async attributes_delete(args, client) {
+    return attributesDelete(client, {
+      label: args.label as string,
+      dry_run: args.dry_run as boolean | undefined,
+      confirm_token: args.confirm_token as string | undefined,
+    });
+  },
+
+  async products_delete(args, client) {
+    return productsDelete(client, {
+      product_id: args.product_id as string,
+      dry_run: args.dry_run as boolean | undefined,
+      confirm_token: args.confirm_token as string | undefined,
+      unlink_variants: args.unlink_variants as boolean | undefined,
+    });
+  },
+
+  async categories_create(args, client) {
+    return categoriesCreate(client, {
+      name: args.name as string,
+      parent_id: args.parent_id as string | undefined,
+    });
+  },
+
+  async categories_update(args, client) {
+    return categoriesUpdate(client, {
+      category_id: args.category_id as string,
+      name: args.name as string | undefined,
+      parent_id: args.parent_id as string | undefined,
+      sort_children: args.sort_children as string[] | undefined,
+    });
+  },
+
+  async categories_sort_root(args, client) {
+    return categoriesSortRoot(client, { category_ids: args.category_ids as string[] });
+  },
+
+  async categories_delete(args, client) {
+    return categoriesDelete(client, {
+      category_id: args.category_id as string,
+      dry_run: args.dry_run as boolean | undefined,
+      confirm_token: args.confirm_token as string | undefined,
+      move_children_to: args.move_children_to as string | undefined,
+    });
+  },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -3543,6 +3827,9 @@ export default {
           }
         );
       }
+
+      // The delete gate reads its cap from the Worker binding, not process.env.
+      configureDeleteCap(env.PLYTIX_MCP_MAX_DELETES);
 
       // Create client with request credentials (only if we have them)
       let client: WorkerPlytixClient | null = null;

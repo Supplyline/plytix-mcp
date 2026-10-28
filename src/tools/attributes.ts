@@ -9,6 +9,13 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
 import { registerTool } from './register.js';
+import { attributesCreate, attributesDelete, attributesUpdate } from '../schema-write-ops.js';
+import { ATTRIBUTE_LEVELS, ATTRIBUTE_TYPE_CLASSES } from '../schema-writes.js';
+
+const completenessAttributeSchema = z.object({
+  id: z.string().nullable().describe('Attribute ID (null for system attributes such as sku)'),
+  label: z.string().min(1).describe('Attribute label'),
+});
 
 export function registerAttributeTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
@@ -368,5 +375,128 @@ export function registerAttributeTools(server: McpServer, client: PlytixClient) 
         };
       }
     }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // attributes_create - Create a product attribute definition
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    name: string;
+    type_class: (typeof ATTRIBUTE_TYPE_CLASSES)[number];
+    description?: string;
+    options?: string[];
+    manual_sorting?: boolean;
+    sort_ascending?: boolean;
+    product_families?: Array<{ id: string; attribute_level?: (typeof ATTRIBUTE_LEVELS)[number] }>;
+    attributes?: Array<{ id: string | null; label: string }>;
+  }>(
+    server,
+    'attributes_create',
+    {
+      title: 'Create Attribute',
+      description:
+        'Create a product attribute definition. Plytix derives the snake_case label from the name. options/manual_sorting/sort_ascending apply to DropdownAttribute and MultiSelectAttribute; attributes applies to CompletenessAttribute.',
+      inputSchema: {
+        name: z.string().min(1).describe('Display name, e.g. "Head Material"'),
+        type_class: z.enum(ATTRIBUTE_TYPE_CLASSES).describe('Attribute type'),
+        description: z.string().optional().describe('Help text shown to editors'),
+        options: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('Allowed values (DropdownAttribute / MultiSelectAttribute only)'),
+        manual_sorting: z
+          .boolean()
+          .optional()
+          .describe('true keeps options in the given order; false sorts them alphabetically (default true)'),
+        sort_ascending: z
+          .boolean()
+          .optional()
+          .describe('Sort direction when manual_sorting is false (default true)'),
+        product_families: z
+          .array(
+            z.object({
+              id: z.string().min(1).describe('Family ID'),
+              attribute_level: z
+                .enum(ATTRIBUTE_LEVELS)
+                .optional()
+                .describe('no_level (default), parent_level or variant_level'),
+            })
+          )
+          .optional()
+          .describe('Families to link the new attribute to'),
+        attributes: z
+          .array(completenessAttributeSchema)
+          .optional()
+          .describe('CompletenessAttribute only: the attributes it tracks'),
+      },
+    },
+    async (input) => attributesCreate(client, input)
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // attributes_update - Patch name/description/options
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    label: string;
+    name?: string;
+    description?: string;
+    options?: string[];
+    add_options?: string[];
+    remove_options?: string[];
+    renamed_options?: Record<string, string>;
+    attributes?: Array<{ id: string | null; label: string }>;
+  }>(
+    server,
+    'attributes_update',
+    {
+      title: 'Update Attribute',
+      description:
+        'Update an attribute definition: name, description, and on dropdown/multiselect its options. Use add_options/remove_options/renamed_options to edit incrementally, or options to replace the full list. renamed_options keeps product values attached through a rename.',
+      inputSchema: {
+        label: z.string().min(1).describe('Attribute label (snake_case identifier)'),
+        name: z.string().min(1).optional().describe('New display name'),
+        description: z.string().optional().describe('New description'),
+        options: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('Full replacement option list (cannot be combined with add_options/remove_options)'),
+        add_options: z.array(z.string().min(1)).optional().describe('Options to append'),
+        remove_options: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('Options to remove (products using them lose that value)'),
+        renamed_options: z
+          .record(z.string().min(1), z.string().min(1))
+          .optional()
+          .describe('Map of old option value -> new value; products keep their selection'),
+        attributes: z
+          .array(completenessAttributeSchema)
+          .optional()
+          .describe('CompletenessAttribute only: replace the tracked attributes'),
+      },
+    },
+    async (input) => attributesUpdate(client, input)
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // attributes_delete - Delete an attribute definition (gated)
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{ label: string; dry_run?: boolean; confirm_token?: string }>(
+    server,
+    'attributes_delete',
+    {
+      title: 'Delete Attribute',
+      description:
+        'Delete an attribute definition and every product value for it. Two-step: call with dry_run: true to get a preview and confirm_token, then call again with the token. Plytix refuses while an e-catalog, channel or PDF catalog uses the attribute.',
+      inputSchema: {
+        label: z.string().min(1).describe('Attribute label (snake_case identifier)'),
+        dry_run: z.boolean().optional().describe('Preview and get a confirm_token without deleting'),
+        confirm_token: z.string().optional().describe('Token from the dry run; required to execute'),
+      },
+    },
+    async (input) => attributesDelete(client, input)
   );
 }

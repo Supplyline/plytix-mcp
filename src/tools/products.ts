@@ -16,6 +16,7 @@ import type {
 } from '../types.js';
 import { PlytixLookup } from '../lookup/index.js';
 import { registerTool } from './register.js';
+import { productsDelete } from '../schema-write-ops.js';
 import type { IdentifierType } from '../lookup/identifier.js';
 import {
   MANIFEST_MAX_ITEMS,
@@ -34,9 +35,9 @@ const batchUpdateItemSchema = z.object({
   product_id: z.string().min(1).optional(),
   label: z.string().optional(),
   status: z.string().optional(),
-  attributes: z.record(z.unknown()).optional(),
-  expected_attributes: z.record(z.unknown()).optional(),
-  if_match: z.record(z.unknown()).optional(),
+  attributes: z.record(z.string(), z.unknown()).optional(),
+  expected_attributes: z.record(z.string(), z.unknown()).optional(),
+  if_match: z.record(z.string(), z.unknown()).optional(),
 });
 
 const batchExportShape = {
@@ -548,7 +549,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         label: z.string().optional().describe('Product label/name'),
         status: z.string().optional().describe('Product status'),
         attributes: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe('Custom attributes as key-value pairs (use attribute labels as keys)'),
         category_ids: z
@@ -629,7 +630,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         label: z.string().optional().describe('New product label/name'),
         status: z.string().optional().describe('New product status'),
         attributes: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe('Attributes to update (use attribute labels as keys, null to clear)'),
       },
@@ -1008,5 +1009,34 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         };
       }
     }
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // products_delete - Delete a product (gated)
+  // ─────────────────────────────────────────────────────────────
+
+  registerTool<{
+    product_id: string;
+    dry_run?: boolean;
+    confirm_token?: string;
+    unlink_variants?: boolean;
+  }>(
+    server,
+    'products_delete',
+    {
+      title: 'Delete Product',
+      description:
+        'Delete one product. Two-step: call with dry_run: true to get a preview (including variants) and a confirm_token, then call again with the token. Deleting a parent deletes its variants unless unlink_variants: true, which first unlinks them into standalone products. Plytix has no bulk delete; call once per product.',
+      inputSchema: {
+        product_id: z.string().min(1).describe('The product ID'),
+        dry_run: z.boolean().optional().describe('Preview and get a confirm_token without deleting'),
+        confirm_token: z.string().optional().describe('Token from the dry run; required to execute'),
+        unlink_variants: z
+          .boolean()
+          .optional()
+          .describe('Unlink variants first so they survive as standalone products (default false)'),
+      },
+    },
+    async (input) => productsDelete(client, input)
   );
 }
