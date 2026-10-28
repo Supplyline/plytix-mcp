@@ -14,6 +14,8 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 PLYTIX_API_BASE = "https://pim.plytix.com"
 PLYTIX_AUTH_URL = "https://auth.plytix.com/auth/api/get-token"
+# Deletes one Worker isolate will perform before refusing more (default 3; "0" disables).
+# PLYTIX_MCP_MAX_DELETES = "3"
 
 # Development settings
 [dev]

@@ -181,7 +181,9 @@ Reason:
 - `POST /api/v2/products`
 - `GET /api/v2/products/:product_id`
 - `PATCH /api/v2/products/:product_id`
-- `DELETE /api/v2/products/:product_id`
+- `DELETE /api/v2/products/:product_id` — 204; the public docs list it under v1, but the v2
+  route exists (confirmed live 2026-10-28: 404 "product does not exist" on an impossible id,
+  not 405). No bulk delete exists; `POST /api/v1/bulk/products` only takes `action: "update"`.
 - `POST /api/v2/products/:product_id/family`
 
 Behavior:
@@ -270,6 +272,13 @@ Important rules:
 - move children first if you need to preserve them
 - `parent_id` and `sort_children` cannot be combined in one patch
 - sorting child categories requires the full ordered child list
+- `parent_id: ""` makes a category root; root ordering goes to `PATCH .../product/root`
+- `POST .../product/:category_id` creates a subcategory; `POST .../product` a root
+- delete returns 204, or 409 when the category (or a descendant) is an e-catalog root
+- there is no single-category GET: search with `{field: "id", operator: "eq"}` (also `in`)
+  returns the row; `{field: "parent_id", operator: "eq"}` lists direct children and
+  `!exists` the roots. Requestable fields: `name`, `path`, `n_children`, `parents_ids`,
+  `order`, `slug`, `modified` (verified live 2026-10-28)
 
 ### Product-linked category endpoints
 
@@ -289,6 +298,9 @@ Link body:
 
 - `POST /api/v2/products/:product_id/variant/:variant_id`
 - `DELETE /api/v2/products/:parent_product_id/variant/:variant_id`
+- `GET /api/v1/products/:parent_product_id/variants` — the only working variants *list*; the v2
+  path answers GET with 405 (confirmed live 2026-10-28). One response, no pagination
+  (`page`/`page_size` are ignored). Rows carry `_parent_id`, `product_type`, `product_level`.
 - `POST /api/v2/products/:parent_product_id/variants`
 - `POST /api/v2/products/:parent_product_id/variants/resync`
 
@@ -404,7 +416,17 @@ Returned filter metadata includes:
 Product attributes are still documented under v1.
 
 - `GET /api/v1/attributes/product/:product_attribute_id`
-- `PATCH /api/v1/attributes/product/:product_attribute_id`
+- `POST /api/v1/attributes/product` — create; `name` + `type_class` required, `description`,
+  `options`/`manual_sorting`/`sort_ascending` (select types), `product_families`
+  (`[{id, attribute_level: no_level|parent_level|variant_level}]`), `attributes` (completeness).
+  Plytix derives `label` from `name`. 201 with the attribute row.
+- `PATCH /api/v1/attributes/product/:product_attribute_id` — `name`, `description`; on select
+  types `options` **replaces** the list, and `renamed_options` (`{old: new}`) keeps product
+  values attached through a rename (the new name must also be in `options`; a rename onto an
+  existing option is refused, rename it away first in a separate request).
+- `DELETE /api/v1/attributes/product/:product_attribute_id` — **202 with an empty body**, not
+  204; 409 with a `usages` report (`ecatalogs`, `channels`, `pdfcatalogs`) while anything
+  still uses it. Route confirmed live 2026-10-28 (404 "id does not exist" on an impossible id).
 - `POST /api/v1/attributes/product/search`
 
 **Search returns full attribute rows — don't loop GETs** (verified live 2026-09-01). Passing

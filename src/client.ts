@@ -235,7 +235,12 @@ export class PlytixClient {
       throw new PlytixError(`Request failed: ${response.status} - ${body}`, response.status, body);
     }
 
-    return (await response.json()) as PlytixResult<T>;
+    // 202 Accepted (attribute delete) and some 200s carry no body.
+    const text = await response.text();
+    if (text.trim() === '') {
+      return { data: [] } as PlytixResult<T>;
+    }
+    return JSON.parse(text) as PlytixResult<T>;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -393,8 +398,14 @@ export class PlytixClient {
     );
   }
 
+  /**
+   * Every variant of a parent, in one response. This is a **v1** route: the v2
+   * path answers GET with 405 (verified live 2026-10-28; variant create/link/
+   * resync stay on v2). Plytix ignores `page`/`page_size` here and returns the
+   * full list, so there is nothing to paginate.
+   */
   async getProductVariants(productId: string): Promise<PlytixResult<PlytixProduct>> {
-    return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}/variants`);
+    return this.request<PlytixProduct>(`/api/v1/products/${encodeURIComponent(productId)}/variants`);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -700,6 +711,53 @@ export class PlytixClient {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Attribute definitions — write operations (v1 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create a product attribute (`POST /api/v1/attributes/product`). The body is
+   * built by `attributeCreateBody` in src/schema-writes.ts. Drops the attribute
+   * cache so the new label resolves on the next lookup.
+   */
+  async createAttribute(body: Record<string, unknown>): Promise<PlytixResult<PlytixAttributeDetail>> {
+    const result = await this.request<PlytixAttributeDetail>('/api/v1/attributes/product', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  /**
+   * Patch an attribute by id (`name`, `description`, and for dropdown/multiselect
+   * `options` + `renamed_options`; `attributes` on a completeness attribute).
+   */
+  async updateAttribute(
+    attributeId: string,
+    body: Record<string, unknown>
+  ): Promise<PlytixResult<PlytixAttributeDetail>> {
+    const result = await this.request<PlytixAttributeDetail>(
+      `/api/v1/attributes/product/${encodeURIComponent(attributeId)}`,
+      { method: 'PATCH', body: JSON.stringify(body) }
+    );
+    this.attributeCache = undefined;
+    return result;
+  }
+
+  /**
+   * Delete an attribute by id. Resolves `true` when Plytix removed it (202) and
+   * `false` when it was already gone (404). A 409 (used by an e-catalog, channel
+   * or PDF catalog) is thrown with Plytix's usage report in the message.
+   */
+  async deleteAttribute(attributeId: string): Promise<boolean> {
+    const removed = await this.deleteOrNotFound(
+      `/api/v1/attributes/product/${encodeURIComponent(attributeId)}`
+    );
+    this.attributeCache = undefined;
+    return removed;
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Assets (v1 API for account-level asset discovery and metadata)
   // ─────────────────────────────────────────────────────────────
 
@@ -862,6 +920,116 @@ export class PlytixClient {
       method: 'POST',
       body: JSON.stringify(body ?? {}),
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Category tree — write operations (v1 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /** Fields requested on every category search made by the tree tools. */
+  private static readonly CATEGORY_FIELDS = [
+    'name',
+    'path',
+    'n_children',
+    'parents_ids',
+    'order',
+    'slug',
+    'modified',
+  ];
+
+  /** One category by id via search (Plytix has no single-category GET), or null. */
+  async getCategoryById(categoryId: string): Promise<PlytixCategory | null> {
+    const result = await this.searchCategories({
+      attributes: PlytixClient.CATEGORY_FIELDS,
+      filters: [[{ field: 'id', operator: 'eq', value: categoryId }]],
+      pagination: { page: 1, page_size: 1 },
+    });
+    return result.data?.[0] ?? null;
+  }
+
+  /** Every direct child of a category, in Plytix's order. Pass "" for the root level. */
+  async getCategoryChildren(parentId: string): Promise<PlytixCategory[]> {
+    const children: PlytixCategory[] = [];
+    const pageSize = 100;
+    for (let page = 1; ; page++) {
+      const result = await this.searchCategories({
+        attributes: PlytixClient.CATEGORY_FIELDS,
+        filters: [
+          [
+            parentId === ''
+              ? { field: 'parent_id', operator: '!exists' }
+              : { field: 'parent_id', operator: 'eq', value: parentId },
+          ],
+        ],
+        pagination: { page, page_size: pageSize, order: 'order' },
+      });
+      const rows = result.data ?? [];
+      children.push(...rows);
+      if (rows.length < pageSize) break;
+    }
+    return children;
+  }
+
+  /** Create a root category, or a subcategory when `parent_id` is given. */
+  async createCategory(data: { name: string; parent_id?: string }): Promise<PlytixResult<PlytixCategory>> {
+    const path = data.parent_id
+      ? `/api/v1/categories/product/${encodeURIComponent(data.parent_id)}`
+      : '/api/v1/categories/product';
+    return this.request<PlytixCategory>(path, {
+      method: 'POST',
+      body: JSON.stringify({ name: data.name }),
+    });
+  }
+
+  /** Rename, move (`parent_id`, "" = root) or reorder children (`sort_children`). */
+  async updateCategory(
+    categoryId: string,
+    body: Record<string, unknown>
+  ): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>(
+      `/api/v1/categories/product/${encodeURIComponent(categoryId)}`,
+      { method: 'PATCH', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Reorder the root-level categories; `categoryIds` must list every root exactly once. */
+  async sortRootCategories(categoryIds: string[]): Promise<PlytixResult<PlytixCategory>> {
+    return this.request<PlytixCategory>('/api/v1/categories/product/root', {
+      method: 'PATCH',
+      body: JSON.stringify({ sort_children: categoryIds }),
+    });
+  }
+
+  /**
+   * Delete a category and its whole subtree. `true` when removed (204), `false`
+   * when already gone (404); a 409 (an e-catalog root) is thrown.
+   */
+  async deleteCategory(categoryId: string): Promise<boolean> {
+    return this.deleteOrNotFound(`/api/v1/categories/product/${encodeURIComponent(categoryId)}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Product deletion (v2 API)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Delete a product. Plytix deletes a parent's variants with it; unlink them
+   * first (`unlinkVariant`) to keep them. `true` when removed (204), `false`
+   * when already gone (404).
+   */
+  async deleteProduct(productId: string): Promise<boolean> {
+    return this.deleteOrNotFound(`/api/v2/products/${encodeURIComponent(productId)}`);
+  }
+
+  /** DELETE that reports a 404 as "nothing to delete" instead of throwing. */
+  private async deleteOrNotFound(path: string): Promise<boolean> {
+    try {
+      await this.request<void>(path, { method: 'DELETE' });
+      return true;
+    } catch (error) {
+      if (error instanceof PlytixError && error.status === 404) return false;
+      throw error;
+    }
   }
 
   async getRelationship(

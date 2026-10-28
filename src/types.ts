@@ -476,6 +476,13 @@ export interface PlytixCategory {
   name: string;
   path: string[];
   parent_id?: string;
+  /** Ancestor ids, root first (returned by category search when requested). */
+  parents_ids?: string[];
+  /** Direct child count (returned by category search when requested). */
+  n_children?: number;
+  order?: string;
+  slug?: string;
+  modified?: string;
   count?: number;
   [key: string]: unknown;
 }

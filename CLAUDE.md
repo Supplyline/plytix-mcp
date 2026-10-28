@@ -29,6 +29,9 @@ src/
   worker-client.ts      # Request-scoped Plytix client for the Cloudflare Worker
   types.ts              # TypeScript types for Plytix API
   worker.ts             # Cloudflare Worker MCP entry point
+  safety.ts             # Two-call delete gate (dry run + confirm token, session cap)
+  schema-writes.ts      # Pure validation/preview helpers for attribute, category and delete tools
+  schema-write-ops.ts   # Shared handlers for those tools (stdio and worker both call these)
   batch/                # Shared batch update/export runners and stdio-only file helpers
   lookup/
     identifier.ts       # Identifier type detection (ID, SKU, MPN, GTIN, label)
@@ -37,10 +40,10 @@ src/
   tools/
     products.ts         # Product tools (lookup, get, search, find, writes)
     families.ts         # Family tools (list, get, create, attribute membership)
-    attributes.ts       # Attribute metadata + filter discovery tools
+    attributes.ts       # Attribute metadata, filter discovery + attribute definition writes
     product-attributes.ts # Atomic product attribute write tools
     assets.ts           # Asset get/search/update + product asset link tools
-    categories.ts       # Category search + product category link tools
+    categories.ts       # Category tree (search/create/update/sort/delete) + product category links
     variants.ts         # Variant lifecycle tools
     relationships.ts    # Relationship discovery + product relationship write tools
   extensions/           # Optional deployment-specific customizations
@@ -93,16 +96,24 @@ src/
 | `products_bulk_update` | Submit up to 1,000 updates as ONE async Plytix bulk job and wait for it to settle (no drift guards; `pending` + `job_id` if the wait budget runs out; stdio also accepts `manifest_path`) |
 | `products_bulk_status` | Poll a bulk job by `job_id`; pass `expected_total` so completion can be confirmed (Plytix reports "Finished" before the summary is populated) |
 | `products_assign_family` | Assign or unassign family (may cause data loss) |
+| `products_delete` | Delete one product via the safety gate; `unlink_variants: true` keeps variants as standalone products (Plytix has no bulk delete) |
 | `products_set_attribute` | Set one product attribute atomically |
 | `products_clear_attribute` | Clear one product attribute atomically |
 | `families_create` | Create a new product family |
 | `families_link_attribute` | Link one or more attributes to a family |
 | `families_unlink_attribute` | Unlink one or more attributes from a family |
+| `attributes_create` | Create an attribute definition (`name` + `type_class`; options/sorting for select types; `product_families`; completeness `attributes`) |
+| `attributes_update` | Patch `name`/`description`; edit select options with `add_options`/`remove_options`/`renamed_options` or a full `options` list |
+| `attributes_delete` | Delete an attribute definition via the safety gate (409 while a catalog/channel uses it) |
 | `assets_update` | Update asset metadata (`filename`, `categories` only) |
 | `assets_link` | Link an existing asset to a product |
 | `assets_unlink` | Unlink an asset from a product |
 | `categories_link` | Link an existing category to a product |
 | `categories_unlink` | Unlink an existing category from a product |
+| `categories_create` | Create a root category or a subcategory (`parent_id`) |
+| `categories_update` | Rename, move (`parent_id`; `""` = root) or reorder children (`sort_children`, full list); never both parent_id and sort_children |
+| `categories_sort_root` | Reorder the root-level categories (full list) |
+| `categories_delete` | Delete a category via the safety gate; subtree goes with it unless `move_children_to` rescues the direct children |
 | `variants_create` | Create a new variant beneath a parent product |
 | `variants_link` | Convert an existing product into a variant |
 | `variants_unlink` | Detach a variant without deleting the product |
@@ -282,6 +293,13 @@ In the handler:
    actually removed**. A 404 no-op must not spend the session budget.
 
 The cap comes from `PLYTIX_MCP_MAX_DELETES` (default 3, `0` disables deletes).
+The Worker reads it from its `env` binding through `configureDeleteCap`; `process`
+does not exist there.
+
+The three delete tools that exist today (`products_delete`, `attributes_delete`,
+`categories_delete`) live in `src/schema-write-ops.ts`, shared by both surfaces.
+They also store the side-effect options and the dependent ids (variants, direct
+children) in the dry-run preview and refuse the execute call if either differs.
 
 Note the gate's limits: the token is returned to the calling agent, so this is
 a forced pause with a preview, not human confirmation. See the README section

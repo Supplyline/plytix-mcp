@@ -98,7 +98,7 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
-The remote worker exposes 48 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
+The remote worker exposes 56 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
 ### Protocol versions
 
@@ -147,6 +147,7 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `products_bulk_update` | Submit up to 1,000 updates as ONE async Plytix bulk job and wait for it to settle (no drift guards; `pending` + `job_id` if the wait budget runs out; stdio also accepts `manifest_path`) |
 | `products_bulk_status` | Poll a bulk job by `job_id`; pass `expected_total` so completion can be confirmed (Plytix reports "Finished" before the summary is populated) |
 | `products_assign_family` | Assign or unassign a product family |
+| `products_delete` | Delete one product (two-step dry run + confirm; `unlink_variants` keeps variants as standalone products) |
 | `products_set_attribute` | Atomic set of one attribute value |
 | `products_clear_attribute` | Atomic clear of one attribute value |
 
@@ -169,6 +170,9 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `attributes_list` | List all attributes (system + custom) with types and options |
 | `attributes_get` | Get full metadata for one attribute label |
 | `attributes_get_options` | Get allowed values for a selectable attribute |
+| `attributes_create` | Create an attribute definition (any type; options, sorting, family links, completeness tracking) |
+| `attributes_update` | Rename, describe, and edit dropdown/multiselect options (`add_options`, `remove_options`, `renamed_options`, or a full `options` list) |
+| `attributes_delete` | Delete an attribute definition (two-step dry run + confirm; refused while a catalog or channel uses it) |
 | `attributes_filters` | Deprecated alias for product filter discovery |
 | `products_filters` | Get product search filter metadata |
 | `assets_filters` | Get asset search filter metadata |
@@ -193,6 +197,10 @@ For detailed setup instructions, see [docs/remote-setup.md](docs/remote-setup.md
 | `categories_list` | List categories associated with a product |
 | `categories_link` | Link a category to a product |
 | `categories_unlink` | Unlink a category from a product |
+| `categories_create` | Create a root category or a subcategory |
+| `categories_update` | Rename, move (`parent_id`, `""` = root) or reorder children (`sort_children`) |
+| `categories_sort_root` | Reorder the root-level categories |
+| `categories_delete` | Delete a category (two-step dry run + confirm; `move_children_to` rescues the subtree) |
 
 ### Variant Tools
 
@@ -270,16 +278,25 @@ Products return an `overwritten_attributes` array listing which attributes are e
 | `PLYTIX_MPN_LABELS` | ❌ | `["attributes.mpn"]` | JSON array of MPN attribute labels |
 | `PLYTIX_MNO_LABELS` | ❌ | `["attributes.model_no"]` | JSON array of MNO attribute labels |
 | `PLYTIX_MCP_EXPORT_DIR` | ❌ | — | Required only for `products_batch_export_to_file`; limits file exports to this directory |
-| `PLYTIX_MCP_MAX_DELETES` | ❌ | `3` | Deletes one server process will perform before refusing further ones. `0` disables deletes entirely. See [Delete safety gate](#delete-safety-gate) |
+| `PLYTIX_MCP_MAX_DELETES` | ❌ | `3` | Deletes one server process (or Worker isolate, via a `[vars]` binding) will perform before refusing further ones. `0` disables deletes entirely. See [Delete safety gate](#delete-safety-gate) |
 
 ### Delete safety gate
 
-`src/safety.ts` provides a two-call gate for destructive tools. A caller first
+`src/safety.ts` provides a two-call gate for the destructive tools
+(`products_delete`, `attributes_delete`, `categories_delete`). A caller first
 invokes the tool with `dry_run: true` and gets back a preview of what would be
 removed plus a `confirm_token`; executing requires calling again with that
 token. Tokens are single-use, scoped to one tool and one target, and expire
 after 5 minutes. A per-process cap (`PLYTIX_MCP_MAX_DELETES`, default 3) bounds
 how much any one session can remove.
+
+The execute call must repeat the side-effect options the preview was issued for
+(`unlink_variants` on a product, `move_children_to` on a category), and it is
+refused if the target's variants or children changed since the dry run. Plytix
+deletes a parent's variants and a category's whole subtree; those two options
+unlink the variants (they become standalone products) or move the direct
+children out first, so only the named item is removed. Plytix has no bulk
+product delete, so `products_delete` is one product per call.
 
 **What this does and does not protect against.** The token goes back to the
 calling agent, not to a human — an autonomous agent can read it from the

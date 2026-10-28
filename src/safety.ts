@@ -58,11 +58,34 @@ let sessionDeleteCount = 0;
  * behave.
  */
 export function maxDeletesPerSession(): number {
-  const raw = process.env.PLYTIX_MCP_MAX_DELETES;
+  return parseMaxDeletes(capOverride ?? nodeEnv('PLYTIX_MCP_MAX_DELETES'));
+}
+
+function parseMaxDeletes(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_DELETES_PER_SESSION;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_MAX_DELETES_PER_SESSION;
   return parsed;
+}
+
+/**
+ * `process.env` without a Node type dependency: the Worker build has no
+ * `process`, and reads the cap through `configureDeleteCap` instead.
+ */
+function nodeEnv(name: string): string | undefined {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.[name];
+}
+
+let capOverride: string | undefined;
+
+/**
+ * Supply the cap from somewhere other than `process.env` (the Worker passes
+ * its `env.PLYTIX_MCP_MAX_DELETES` binding per request). `undefined` clears
+ * the override so `process.env` applies again.
+ */
+export function configureDeleteCap(raw: string | undefined): void {
+  capOverride = raw;
 }
 
 /**

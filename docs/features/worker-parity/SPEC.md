@@ -6,8 +6,8 @@
 
 The Cloudflare Worker MCP server now exposes the full API-backed tool surface.
 
-- `stdio`: 51 tools
-- `remote worker`: 46 tools
+- `stdio`: 61 tools
+- `remote worker`: 56 tools
 - intentional remote omissions: `identifier_detect`, `identifier_normalize`, `match_score`,
   `products_batch_update_manifest`, `products_batch_export_to_file`
 
@@ -21,6 +21,8 @@ batch tools with lower caps instead.
 ## Current Parity Rules
 
 1. Every API-backed tool added to `src/tools/*.ts` should also be added to `src/worker.ts`.
+   Put the handler logic in a shared module (as `src/schema-write-ops.ts` does for the
+   attribute, category-tree and delete tools) so each surface is only a schema wrapper.
 2. Shared stdio and worker tools should keep the same schema and response shape.
 3. Pure local utilities may remain stdio-only if the omission is intentional and documented.
 4. Public docs must be updated when tool counts or remote availability change.

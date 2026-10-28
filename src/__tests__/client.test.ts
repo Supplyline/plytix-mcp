@@ -700,3 +700,144 @@ describe('PlytixClient bulk update', () => {
     expect(result.status).toBe('finished');
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// Schema writes: attribute definitions, category tree, product delete
+// ─────────────────────────────────────────────────────────────
+
+describe('PlytixClient schema writes', () => {
+  const ATTRS = `${BASE_URL}/api/v1/attributes/product`;
+  const CATS = `${BASE_URL}/api/v1/categories/product`;
+  const empty = (status: number) => new Response(null, { status });
+
+  it('creates, patches and deletes an attribute, invalidating the label cache', async () => {
+    const seen: Array<{ method: string; url: string; body?: string }> = [];
+    let searchCalls = 0;
+    stubFetch(authRoute(), (url, init) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/attributes/product/search')) {
+        searchCalls++;
+        return json({ data: [{ id: 'a1', label: 'colour', name: 'Colour', type_class: 'DropdownAttribute', options: ['Red'] }], pagination: { page: 1, page_size: 100, total_count: 1 } });
+      }
+      if (url.startsWith(ATTRS)) {
+        seen.push({ method, url, body: init?.body ? String(init.body) : undefined });
+        if (method === 'POST') return json({ data: [{ id: 'a2', label: 'size', name: 'Size', type_class: 'DropdownAttribute' }] }, 201);
+        if (method === 'PATCH') return json({ data: [{ id: 'a1', label: 'colour', name: 'Colour', type_class: 'DropdownAttribute', options: ['Red', 'Blue'] }] });
+        if (method === 'DELETE') return empty(202); // Plytix answers an attribute delete with 202 and no body
+      }
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    expect((await client.getAttributeByLabel('colour'))?.id).toBe('a1');
+    expect(searchCalls).toBe(1);
+
+    const created = await client.createAttribute({ name: 'Size', type_class: 'DropdownAttribute', options: ['S'] });
+    expect(created.data?.[0]?.id).toBe('a2');
+    expect(seen[0]).toMatchObject({ method: 'POST', url: ATTRS });
+    expect(JSON.parse(seen[0]!.body!)).toEqual({ name: 'Size', type_class: 'DropdownAttribute', options: ['S'] });
+    await client.getAttributeByLabel('colour');
+    expect(searchCalls).toBe(2); // cache dropped by the create
+
+    const patched = await client.updateAttribute('a1', { options: ['Red', 'Blue'] });
+    expect(patched.data?.[0]?.options).toEqual(['Red', 'Blue']);
+    expect(seen[1]).toMatchObject({ method: 'PATCH', url: `${ATTRS}/a1` });
+
+    expect(await client.deleteAttribute('a1')).toBe(true);
+    expect(seen[2]).toMatchObject({ method: 'DELETE', url: `${ATTRS}/a1` });
+    await client.getAttributeByLabel('colour');
+    expect(searchCalls).toBe(3); // dropped by the patch and the delete; one rebuild serves the next lookup
+  });
+
+  it('reports a 404 delete as false and rethrows a 409', async () => {
+    stubFetch(authRoute(), (url, init) => {
+      if (init?.method !== 'DELETE') return undefined;
+      if (url.endsWith('/gone')) return json({ error: { msg: 'No results found' } }, 404);
+      if (url.endsWith('/used')) return json({ error: { msg: 'in use' } }, 409);
+      return undefined;
+    });
+    const client = makeClient(UNPACED);
+    expect(await client.deleteAttribute('gone')).toBe(false);
+    expect(await client.deleteProduct('gone')).toBe(false);
+    expect(await client.deleteCategory('gone')).toBe(false);
+    await expect(client.deleteAttribute('used')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('lists variants through the v1 route (v2 answers GET with 405)', async () => {
+    const urls: string[] = [];
+    stubFetch(authRoute(), (url) => {
+      if (!url.includes('/variants')) return undefined;
+      urls.push(url);
+      return json({ data: [{ id: 'v1', sku: 'V1', _parent_id: 'p1' }] });
+    });
+    const client = makeClient(UNPACED);
+    const result = await client.getProductVariants('p1');
+    expect(result.data?.map((v) => v.id)).toEqual(['v1']);
+    expect(urls).toEqual([`${BASE_URL}/api/v1/products/p1/variants`]);
+  });
+
+  it('deletes a product through the v2 route', async () => {
+    const urls: string[] = [];
+    stubFetch(authRoute(), (url, init) => {
+      if (init?.method !== 'DELETE') return undefined;
+      urls.push(url);
+      return empty(204);
+    });
+    const client = makeClient(UNPACED);
+    expect(await client.deleteProduct('p 1')).toBe(true);
+    expect(urls).toEqual([`${BASE_URL}/api/v2/products/p%201`]);
+  });
+
+  it('walks the category tree: lookup by id, children, create, update, sort root, delete', async () => {
+    const seen: Array<{ method: string; url: string; body: unknown }> = [];
+    stubFetch(authRoute(), (url, init) => {
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      seen.push({ method, url, body });
+      if (url === `${CATS}/search`) {
+        const filter = body.filters[0][0];
+        if (filter.field === 'id') return json({ data: [{ id: filter.value, name: 'Pumps', path: ['Pumps'], n_children: 2 }] });
+        if (filter.operator === '!exists') return json({ data: [{ id: 'r1', name: 'R1', path: ['R1'] }] });
+        // children: two pages of 100 then a short page
+        const page = body.pagination.page as number;
+        const size = page < 3 ? 100 : 1;
+        return json({ data: Array.from({ length: size }, (_, i) => ({ id: `c${page}-${i}`, name: 'C', path: ['Pumps', 'C'] })) });
+      }
+      if (url === CATS && method === 'POST') return json({ data: [{ id: 'new-root', name: body.name, path: [body.name] }] });
+      if (url === `${CATS}/parent-1` && method === 'POST') return json({ data: [{ id: 'new-sub', name: body.name, path: ['P', body.name] }] });
+      if (url === `${CATS}/c1` && method === 'PATCH') return json({ data: [{ id: 'c1', name: body.name ?? 'C', path: ['C'] }] });
+      if (url === `${CATS}/root` && method === 'PATCH') return json({ data: [] });
+      if (url === `${CATS}/c1` && method === 'DELETE') return empty(204);
+      return undefined;
+    });
+
+    const client = makeClient(UNPACED);
+    const byId = await client.getCategoryById('cat-1');
+    expect(byId).toMatchObject({ id: 'cat-1', name: 'Pumps' });
+    expect(seen[0]!.body).toMatchObject({
+      filters: [[{ field: 'id', operator: 'eq', value: 'cat-1' }]],
+      attributes: expect.arrayContaining(['name', 'path', 'n_children', 'parents_ids']),
+    });
+
+    const children = await client.getCategoryChildren('cat-1');
+    expect(children).toHaveLength(201);
+    expect(seen[1]!.body).toMatchObject({ filters: [[{ field: 'parent_id', operator: 'eq', value: 'cat-1' }]], pagination: { page: 1, page_size: 100, order: 'order' } });
+    expect(seen[3]!.body).toMatchObject({ pagination: { page: 3 } });
+
+    const roots = await client.getCategoryChildren('');
+    expect(roots.map((r) => r.id)).toEqual(['r1']);
+    expect(seen[4]!.body).toMatchObject({ filters: [[{ field: 'parent_id', operator: '!exists' }]] });
+
+    expect((await client.createCategory({ name: 'Valves' })).data?.[0]?.id).toBe('new-root');
+    expect(seen[5]).toMatchObject({ method: 'POST', url: CATS, body: { name: 'Valves' } });
+    expect((await client.createCategory({ name: 'Ball', parent_id: 'parent-1' })).data?.[0]?.id).toBe('new-sub');
+    expect(seen[6]).toMatchObject({ method: 'POST', url: `${CATS}/parent-1`, body: { name: 'Ball' } });
+
+    await client.updateCategory('c1', { parent_id: '' });
+    expect(seen[7]).toMatchObject({ method: 'PATCH', url: `${CATS}/c1`, body: { parent_id: '' } });
+    await client.sortRootCategories(['r1']);
+    expect(seen[8]).toMatchObject({ method: 'PATCH', url: `${CATS}/root`, body: { sort_children: ['r1'] } });
+    expect(await client.deleteCategory('c1')).toBe(true);
+    expect(seen[9]).toMatchObject({ method: 'DELETE', url: `${CATS}/c1` });
+  });
+});
