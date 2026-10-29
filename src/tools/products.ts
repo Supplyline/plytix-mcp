@@ -27,11 +27,11 @@ import { registerTool } from './register.js';
 import { productsDelete } from '../schema-write-ops.js';
 import type { IdentifierType } from '../lookup/identifier.js';
 import {
-  MANIFEST_MAX_ITEMS,
   STDIO_INLINE_MAX_BYTES,
   STDIO_INLINE_MAX_ITEMS,
 } from '../batch/helpers.js';
-import { readBatchManifest, writeBatchReceipt } from '../batch/manifest.js';
+import { readBatchManifest } from '../batch/manifest.js';
+import { executeManifestUpdate, manifestResponse } from '../batch/manifest-submit.js';
 import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BULK_MAX_WAIT_TIMEOUT_MS } from '../batch/bulk.js';
 import {
   STDIO_EXPORT_INLINE_MAX_BYTES,
@@ -754,6 +754,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     dry_run?: boolean;
     return_successes?: boolean;
     write_receipt?: boolean;
+    response_mode?: 'full' | 'compact';
   }>(
     server,
     'products_batch_update_manifest',
@@ -761,6 +762,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
       title: 'Batch Update Products From Manifest',
       description: 'Read a local JSON manifest and update products without sending large payloads through the model context. A null value in expected_attributes / if_match asserts the live attribute is currently empty (null or absent); a present empty string does not match.',
       inputSchema: {
+        response_mode: z.enum(['full', 'compact']).optional().describe('Compact output retains full successes in a receipt file; defaults to full'),
         manifest_path: z.string().min(1).describe('Path to a schema_version: 1 JSON manifest'),
         dry_run: z
           .boolean()
@@ -776,32 +778,15 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
           .describe('Write the result next to the manifest as <manifest>.receipt.<dry-run|live>.<time>.json (default true)'),
       },
     },
-    async ({ manifest_path, dry_run, return_successes, write_receipt }) => {
+    async ({ manifest_path, dry_run, return_successes, write_receipt, response_mode }) => {
       try {
-        const manifest = await readBatchManifest(manifest_path);
-        const result: BatchUpdateResult = await client.batchUpdateProducts(manifest.items, {
-          dryRun: dry_run === true,
-          returnSuccesses: return_successes === true,
-          maxItems: MANIFEST_MAX_ITEMS,
-          metadata: manifest.metadata,
+        const result = await executeManifestUpdate(client, manifest_path, {
+          dryRun: dry_run, returnSuccesses: return_successes, writeReceipt: write_receipt,
+          compact: response_mode === 'compact',
         });
-        if (write_receipt !== false) {
-          try {
-            const receiptPath = await writeBatchReceipt(manifest_path, result, {
-              dryRun: dry_run === true,
-              manifestSha256: manifest.metadata.manifest_sha256,
-            });
-            Object.assign(result, { receipt_path: receiptPath });
-          } catch (error) {
-            // The write already happened (or not); a missing receipt must not hide its result.
-            Object.assign(result, {
-              receipt_error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
 
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(manifestResponse(result, response_mode === 'compact'), null, 2) }],
           ...(result.status === 'rejected' ? { isError: true } : {}),
         };
       } catch (error) {

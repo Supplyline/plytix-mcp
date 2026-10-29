@@ -15,6 +15,8 @@
 
 import {
   PlytixError,
+  MutationNotSubmittedError,
+  type MutationGuard,
   type RateLimitConfig,
   type RateLimitHit,
   type RateLimitWindow,
@@ -301,6 +303,8 @@ export class TokenBucket {
 // ─────────────────────────────────────────────────────────────
 
 export interface RetryingFetchOptions {
+  /** Called after all pacing/auth waits, before every mutation fetch, including retries. */
+  beforeMutation?: MutationGuard;
   url: string;
   init: RequestInit;
   /** Logged and used for the mutation check. */
@@ -353,6 +357,16 @@ export async function fetchWithRetry(options: RetryingFetchOptions): Promise<Res
     const headers = new Headers(options.init.headers);
     if (token !== undefined) headers.set('Authorization', `Bearer ${token}`);
     if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+
+    if (options.beforeMutation && isMutation(options.method, options.path)) {
+      try {
+        await options.beforeMutation();
+      } catch (error) {
+        throw new MutationNotSubmittedError(
+          `Mutation not submitted: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs);

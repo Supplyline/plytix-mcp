@@ -10,6 +10,7 @@
  */
 
 import type {
+  MutationGuard,
   PlytixAuthToken,
   PlytixAuthResponse,
   PlytixClientConfig,
@@ -333,7 +334,8 @@ export class WorkerPlytixClient {
 
   private async request<T = unknown>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    beforeMutation?: MutationGuard
   ): Promise<PlytixResult<T>> {
     // Ensure no trailing slash (causes redirect that drops Authorization header)
     const url = `${this.config.baseUrl}${endpoint}`.replace(/\/+$/, '');
@@ -350,6 +352,7 @@ export class WorkerPlytixClient {
           bucket,
           timeoutMs: this.config.timeoutMs,
           log: logStructured,
+          beforeMutation,
           getToken: () => this.getToken(),
           onUnauthorized: async () => {
             // Token expired - clear both caches so the next attempt re-mints
@@ -445,6 +448,7 @@ export class WorkerPlytixClient {
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
+      beforeMutation: options.beforeMutation,
       dryRunLiveGapMs: options.dryRunLiveGapMs,
       now: options.now,
       sleep: options.sleep,
@@ -545,12 +549,13 @@ export class WorkerPlytixClient {
       label?: string;
       status?: string;
       attributes?: Record<string, unknown>;
-    }
+    },
+    beforeMutation?: MutationGuard
   ): Promise<PlytixResult<PlytixProduct>> {
     return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
-    });
+    }, beforeMutation);
   }
 
   async createProduct(data: {

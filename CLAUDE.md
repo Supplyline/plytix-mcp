@@ -155,6 +155,19 @@ The lookup system automatically detects identifier types and uses staged search 
 
 When adding new functionality, ask: "Would this be useful to any Plytix user, or is it specific to one deployment's workflow?"
 
+### Supplyline guarded submission adapter
+
+`src/extensions/supplyline-submit.ts` is an opt-in, one-shot CLI used by Supplyline ETL's
+`skills.primitives.writes.plytix_manifest_submit`. It reuses the manifest executor; it is not
+registered as a generic tool and does not change existing server processes. Its fixed Python
+gate runs at admission and immediately before each mutation HTTP attempt, after pacing/auth.
+The adapter retains complete receipts and raw by-ID readbacks and claims each context once;
+interrupted contexts require the ETL reconciliation path, never automatic replay.
+
+Generic `products_batch_update_manifest` callers may request `response_mode: "compact"`:
+full successes are retained in the receipt before being omitted from the response. Receipt
+failure returns the full result. Compact output alone does not enable Supplyline policy checks.
+
 ## Environment Variables
 
 Required:

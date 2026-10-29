@@ -1,4 +1,6 @@
+import { MutationNotSubmittedError } from '../types.js';
 import type {
+  MutationGuard,
   BatchUpdateFailure,
   BatchUpdateItem,
   BatchUpdateMetadata,
@@ -35,11 +37,13 @@ export interface BatchUpdateOperations {
       label?: string;
       status?: string;
       attributes?: Record<string, unknown>;
-    }
+    },
+    beforeMutation?: MutationGuard
   ): Promise<PlytixResult<PlytixProduct>>;
 }
 
 export interface ExecuteBatchUpdateOptions {
+  beforeMutation?: MutationGuard;
   maxItems: number;
   maxBytes?: number;
   dryRun?: boolean;
@@ -62,7 +66,7 @@ export interface ExecuteBatchUpdateOptions {
 export const DEFAULT_DRY_RUN_LIVE_GAP_MS = 12_000;
 const DRY_RUN_MEMORY_LIMIT = 50;
 const DEFERRED_MSG =
-  'not started: an earlier row exhausted the account rate window; resubmit this row unchanged';
+  'not started: an earlier row stopped the batch; recheck controls before resubmitting';
 
 /** Dry runs per client (the stdio server keeps one client for its lifetime). */
 const dryRunMemory = new WeakMap<object, Map<string, number>>();
@@ -305,7 +309,7 @@ export async function executeBatchUpdate(
       concurrency: options.concurrency ?? DEFAULT_BATCH_CONCURRENCY,
       requestDelayMs: options.requestDelayMs ?? DEFAULT_BATCH_REQUEST_DELAY_MS,
     },
-    (row) => patchRowWithRetry(ops, row, undefined, run)
+    (row) => patchRowWithRetry(ops, row, undefined, run, options.beforeMutation)
   );
 
   const patchFailures = patchResults
@@ -463,10 +467,11 @@ async function patchRowWithRetry(
   ops: BatchUpdateOperations,
   row: ReadyRow,
   retries?: number,
-  run: RunState = { halted: false }
+  run: RunState = { halted: false },
+  beforeMutation?: MutationGuard
 ): Promise<PatchRowResult> {
   const failure = (
-    stage: 'read' | 'patch',
+    stage: 'read' | 'patch' | 'deferred',
     errors: BatchUpdateFailure['errors'],
     unwritten: boolean
   ): PatchRowResult => ({
@@ -494,15 +499,17 @@ async function patchRowWithRetry(
   const body = buildPatchBody(row.item);
   let result: PlytixResult<PlytixProduct>;
   try {
-    result = await runTransientRetry(() => ops.updateProduct(row.productId, body), {
+    result = await runTransientRetry(() => beforeMutation ? ops.updateProduct(row.productId, body, beforeMutation) : ops.updateProduct(row.productId, body), {
       retries,
       mutation: true,
     });
   } catch (error) {
-    // A 429 means Plytix did not process the PATCH; any other error may have applied it.
+    // A pre-fetch policy refusal and an exhausted 429 wrote nothing in this request.
+    // Other errors remain ambiguous and require reconciliation.
     const rateLimited = isRateLimited(error);
-    if (rateLimited) run.halted = true;
-    return failure('patch', parsePlytixErrors(error), rateLimited);
+    const notSubmitted = error instanceof MutationNotSubmittedError;
+    if (rateLimited || notSubmitted) run.halted = true;
+    return failure(notSubmitted ? 'deferred' : 'patch', parsePlytixErrors(error), rateLimited || notSubmitted);
   }
 
   const updated = result.data?.[0];
