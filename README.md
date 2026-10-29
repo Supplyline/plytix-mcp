@@ -259,6 +259,16 @@ Input: "LMI-PD-123"
 
 ## Inheritance Tracking
 
+`products_get` returns the full product by default. For a smaller view of custom
+attributes, pass `attribute_labels: ["short_description", "list_price"]` (at most
+50 exact, unprefixed labels). `[]` selects no custom attribute values. This opt-in
+mode returns `{ product, projection }`; `projection.requested_labels` and
+`projection.missing_labels` distinguish unrequested fields from keys absent in
+the fetched attributes. Explicit null values remain null. Native top-level
+fields and the entire `overwritten_attributes` list remain unchanged. This is
+local display filtering after a full direct GET, not an upstream projection or a
+response-size cap. A projected view is not a complete write/readback baseline.
+
 Products return an `overwritten_attributes` array listing which attributes are explicitly set (not inherited from family). Use this with:
 
 - `product_family_id` — The family this product belongs to

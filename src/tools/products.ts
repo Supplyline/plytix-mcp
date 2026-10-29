@@ -1,3 +1,10 @@
+import {
+  PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
+  PRODUCT_GET_DESCRIPTION,
+  PRODUCT_GET_ATTRIBUTE_LABELS_DESCRIPTION,
+  validateProductGetAttributeLabels,
+  projectProductGet,
+} from '../utils/product-get-projection.js';
 import { normalizeProductSearchFilters, PRODUCT_SEARCH_FILTERS_DESCRIPTION } from '../utils/product-search-filters.js';
 /**
  * Product Tools
@@ -155,18 +162,21 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // products.get - Fetch single product by ID
   // ─────────────────────────────────────────────────────────────
 
-  registerTool<{ product_id: string }>(
+  registerTool<{ product_id: string; attribute_labels?: string[] }>(
     server,
     'products_get',
     {
       title: 'Get Product',
-      description: 'Get one product by ID.',
+      description: PRODUCT_GET_DESCRIPTION,
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch'),
+        attribute_labels: z.array(z.string().min(1)).max(PRODUCT_GET_MAX_ATTRIBUTE_LABELS).optional()
+          .describe(PRODUCT_GET_ATTRIBUTE_LABELS_DESCRIPTION),
       },
     },
-    async ({ product_id }) => {
+    async ({ product_id, attribute_labels }) => {
       try {
+        const labels = validateProductGetAttributeLabels(attribute_labels);
         const result = await client.getProduct(product_id);
 
         if (!result.data?.[0]) {
@@ -177,7 +187,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         }
 
         return {
-          content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(projectProductGet(result.data[0], labels), null, 2) }],
         };
       } catch (error) {
         return {

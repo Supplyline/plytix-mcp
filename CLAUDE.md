@@ -57,7 +57,7 @@ src/
 | Tool | Description |
 |------|-------------|
 | `products_lookup` | Smart lookup by any identifier (auto-detects type) |
-| `products_get` | Get a single product by ID (includes `overwritten_attributes`) |
+| `products_get` | Get a single product by ID; optional `attribute_labels` returns an explicit local custom-attribute projection (native fields and full `overwritten_attributes` retained) |
 | `products_search` | Advanced product search with filters, pagination, and sorting |
 | `products_find` | Multi-criteria search (SKU, MPN, GTIN, label, fuzzy) |
 | `products_batch_export` | Capped inline product export by search, SKU, or product ID |

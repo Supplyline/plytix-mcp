@@ -1,3 +1,10 @@
+import {
+  PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
+  PRODUCT_GET_DESCRIPTION,
+  PRODUCT_GET_ATTRIBUTE_LABELS_DESCRIPTION,
+  validateProductGetAttributeLabels,
+  projectProductGet,
+} from './utils/product-get-projection.js';
 import { normalizeProductSearchFilters, PRODUCT_SEARCH_FILTERS_DESCRIPTION } from './utils/product-search-filters.js';
 /**
  * Plytix MCP Server - Cloudflare Worker Entry Point
@@ -513,13 +520,19 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'products_get',
-    description: 'Get one product by ID.',
+    description: PRODUCT_GET_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
         product_id: {
           type: 'string',
           description: 'The product ID to fetch',
+        },
+        attribute_labels: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+          maxItems: PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
+          description: PRODUCT_GET_ATTRIBUTE_LABELS_DESCRIPTION,
         },
       },
       required: ['product_id'],
@@ -1535,6 +1548,7 @@ const toolHandlers: Record<string, ToolHandler> = {
 
   async products_get(args, client) {
     const productId = args.product_id as string;
+    const labels = validateProductGetAttributeLabels(args.attribute_labels);
     const result = await client.getProduct(productId);
 
     if (!result.data?.[0]) {
@@ -1545,7 +1559,7 @@ const toolHandlers: Record<string, ToolHandler> = {
     }
 
     return {
-      content: [{ type: 'text', text: JSON.stringify(result.data[0], null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify(projectProductGet(result.data[0], labels), null, 2) }],
     };
   },
 
