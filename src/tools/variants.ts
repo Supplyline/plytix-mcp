@@ -16,7 +16,7 @@ export function registerVariantTools(server: McpServer, client: PlytixClient) {
     'variants_list',
     {
       title: 'List Variants',
-      description: 'List variants for a product.',
+      description: 'List one variants response for a product; no automatic pagination or completeness guarantee. Preserves returned pagination metadata. Count, when present, is the number of returned rows.',
       inputSchema: {
         product_id: z.string().min(1).describe('The product ID to fetch variants for'),
       },

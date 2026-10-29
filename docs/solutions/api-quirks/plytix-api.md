@@ -294,13 +294,16 @@ Link body:
 
 ## 11. Variants
 
-### v2 variant endpoints
+### Variant endpoints
 
 - `POST /api/v2/products/:product_id/variant/:variant_id`
 - `DELETE /api/v2/products/:parent_product_id/variant/:variant_id`
 - `GET /api/v1/products/:parent_product_id/variants` — the only working variants *list*; the v2
-  path answers GET with 405 (confirmed live 2026-10-28). One response, no pagination
-  (`page`/`page_size` are ignored). Rows carry `_parent_id`, `product_type`, `product_level`.
+  path answers GET with 405 (confirmed live 2026-10-28). The list tool returns one
+  response and preserves any pagination metadata; it does not promise complete catalog
+  coverage. Nested parents have been observed repeating the same rows when `page` changes,
+  so an automatic short-page loop is unsafe. Rows carry `_parent_id`, `product_type`,
+  `product_level`. Verify completeness against an independent scoped search when needed.
 - `POST /api/v2/products/:parent_product_id/variants`
 - `POST /api/v2/products/:parent_product_id/variants/resync`
 
