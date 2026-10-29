@@ -11,6 +11,7 @@
 
 import 'dotenv/config';
 import type {
+  MutationGuard,
   PlytixAuthToken,
   PlytixAuthResponse,
   PlytixClientConfig,
@@ -199,7 +200,8 @@ export class PlytixClient {
 
   private async request<T = unknown>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    beforeMutation?: MutationGuard
   ): Promise<PlytixResult<T>> {
     // Ensure no trailing slash (causes redirect that drops Authorization header)
     const url = `${this.config.baseUrl}${endpoint}`.replace(/\/+$/, '');
@@ -215,6 +217,7 @@ export class PlytixClient {
         bucket: this.bucket,
         timeoutMs: this.config.timeoutMs,
         log: logStructured,
+        beforeMutation,
         getToken: () => this.getToken(),
         onUnauthorized: () => {
           this.token = undefined;
@@ -308,6 +311,7 @@ export class PlytixClient {
       concurrency: options.concurrency,
       requestDelayMs: options.requestDelayMs,
       returnSuccesses: options.returnSuccesses,
+      beforeMutation: options.beforeMutation,
       dryRunLiveGapMs: options.dryRunLiveGapMs ?? dryRunLiveGapFromEnv(),
       now: options.now,
       sleep: options.sleep,
@@ -827,12 +831,13 @@ export class PlytixClient {
       label?: string;
       status?: string;
       attributes?: Record<string, unknown>;
-    }
+    },
+    beforeMutation?: MutationGuard
   ): Promise<PlytixResult<PlytixProduct>> {
     return this.request<PlytixProduct>(`/api/v2/products/${encodeURIComponent(productId)}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
-    });
+    }, beforeMutation);
   }
 
   /**

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { stat, readFile, writeFile } from 'node:fs/promises';
+import { stat, readFile, open } from 'node:fs/promises';
 import { extname } from 'node:path';
 import type { BatchUpdateItem, BatchUpdateMetadata } from '../types.js';
 import { MANIFEST_MAX_BYTES } from './helpers.js';
@@ -94,11 +94,22 @@ export async function writeBatchReceipt(
     const suffix = attempt === 0 ? '' : `-${attempt}`;
     const path = `${base}.receipt.${options.dryRun ? 'dry-run' : 'live'}.${stamp}${suffix}.json`;
     try {
-      await writeFile(path, body, { flag: 'wx' });
+      await writeExclusiveFile(path, body);
       return path;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error;
     }
   }
   throw new Error('could not find a free receipt file name');
+}
+
+/** Persist complete evidence before returning. Existing paths are never overwritten. */
+export async function writeExclusiveFile(path: string, body: string): Promise<void> {
+  const file = await open(path, 'wx');
+  try {
+    await file.writeFile(body);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
 }

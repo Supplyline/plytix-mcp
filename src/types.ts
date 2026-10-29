@@ -582,6 +582,8 @@ export interface PlytixClientConfig {
 // Errors
 // ─────────────────────────────────────────────────────────────
 
+export type MutationGuard = () => Promise<void>;
+
 export class PlytixError extends Error {
   constructor(
     message: string,
@@ -591,5 +593,13 @@ export class PlytixError extends Error {
   ) {
     super(message);
     this.name = 'PlytixError';
+  }
+}
+
+/** A policy refused this request before fetch; no mutation was attempted by this call. */
+export class MutationNotSubmittedError extends PlytixError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MutationNotSubmittedError';
   }
 }
