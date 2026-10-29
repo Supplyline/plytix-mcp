@@ -399,10 +399,10 @@ export class PlytixClient {
   }
 
   /**
-   * Every variant of a parent, in one response. This is a **v1** route: the v2
-   * path answers GET with 405 (verified live 2026-10-28; variant create/link/
-   * resync stay on v2). Plytix ignores `page`/`page_size` here and returns the
-   * full list, so there is nothing to paginate.
+   * Read one variants response through v1; the v2 GET answers with 405.
+   * Variant create/link/resync stay on v2. Do not infer catalog completeness:
+   * nested parents have been observed repeating the same rows for page requests.
+   * Return the response and any pagination metadata without auto-pagination.
    */
   async getProductVariants(productId: string): Promise<PlytixResult<PlytixProduct>> {
     return this.request<PlytixProduct>(`/api/v1/products/${encodeURIComponent(productId)}/variants`);

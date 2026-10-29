@@ -1369,7 +1369,7 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'variants_list',
-    description: 'List variants for a product.',
+    description: 'List one variants response for a product; no automatic pagination or completeness guarantee. Preserves returned pagination metadata. Count, when present, is the number of returned rows.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2704,6 +2704,8 @@ const toolHandlers: Record<string, ToolHandler> = {
             {
               variants: result.data,
               count: result.data?.length ?? 0,
+              pagination: result.pagination,
+              attributes: result.attributes,
             },
             null,
             2

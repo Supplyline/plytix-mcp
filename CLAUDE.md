@@ -183,6 +183,7 @@ Optional:
 **API versions:**
 - Product reads/writes, product-linked assets/categories, relationship mutations, and most variant operations use v2 (`/api/v2/...`)
 - Account-level assets, category discovery, relationship definitions, families, filters, and attribute metadata use v1 (`/api/v1/...`)
+- Variant listing is also v1 (`GET /api/v1/products/{id}/variants`); variant writes stay v2. The list tool returns one response with any pagination metadata, without claiming completeness or automatically paging.
 
 **Attribute limits:**
 - v2 search: max 50 attributes
