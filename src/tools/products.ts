@@ -1,3 +1,4 @@
+import { normalizeProductSearchFilters, PRODUCT_SEARCH_FILTERS_DESCRIPTION } from '../utils/product-search-filters.js';
 /**
  * Product Tools
  *
@@ -306,10 +307,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         filters: z
           .array(z.any())
           .optional()
-          .describe(
-            'Search filters. Each filter is an array of conditions (OR within, AND between). ' +
-              'Format: [[{field, operator, value}], [{field, operator, value}]]'
-          ),
+          .describe(PRODUCT_SEARCH_FILTERS_DESCRIPTION),
         pagination: z
           .object({
             page: z.number().int().positive().default(1),
@@ -321,17 +319,8 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
     },
     async (args) => {
       try {
-        // Normalize [field, operator, value] tuples to objects (parity with the worker).
         if (Array.isArray(args.filters)) {
-          args.filters = (args.filters as unknown[]).map((group) =>
-            Array.isArray(group)
-              ? group.map((item) =>
-                  Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string'
-                    ? { field: item[0], operator: item[1], value: item[2] }
-                    : item
-                )
-              : group
-          ) as typeof args.filters;
+          args = { ...args, filters: normalizeProductSearchFilters(args.filters) };
         }
         const result = await client.searchProducts(args as Parameters<typeof client.searchProducts>[0]);
 

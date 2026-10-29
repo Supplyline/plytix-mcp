@@ -1,3 +1,4 @@
+import { normalizeProductSearchFilters, PRODUCT_SEARCH_FILTERS_DESCRIPTION } from './utils/product-search-filters.js';
 /**
  * Plytix MCP Server - Cloudflare Worker Entry Point
  *
@@ -551,7 +552,7 @@ const TOOLS: ToolDefinition[] = [
         },
         filters: {
           type: 'array',
-          description: 'Search filters. Format: [[{field, operator, value}]]',
+          description: PRODUCT_SEARCH_FILTERS_DESCRIPTION,
         },
         pagination: {
           type: 'object',
@@ -1614,18 +1615,8 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
 
   async products_search(args, client) {
-    // Normalize filter shorthand: LLMs may pass ["field","op","value"] tuples
-    // instead of the required {field, operator, value} objects.
     if (Array.isArray(args.filters)) {
-      args.filters = (args.filters as unknown[][]).map((group) => {
-        if (!Array.isArray(group)) return group;
-        return group.map((item) => {
-          if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string') {
-            return { field: item[0], operator: item[1], value: item[2] };
-          }
-          return item;
-        });
-      });
+      args = { ...args, filters: normalizeProductSearchFilters(args.filters) };
     }
 
     const result = await client.searchProducts(args as Record<string, unknown>);
