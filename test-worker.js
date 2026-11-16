@@ -175,7 +175,7 @@ async function runTests() {
       if (!json.error) {
         throw new Error('Unauthenticated tools/call returned a result instead of an auth error');
       }
-      if (!/credential/i.test(json.error.message || '')) {
+      if (response.status !== 401 || !response.headers.has('WWW-Authenticate')) {
         throw new Error(`Expected a credentials error, got: ${json.error.message}`);
       }
     })
@@ -216,6 +216,9 @@ async function runTests() {
           'products_search',
           'families_list',
           'attributes_list',
+          'families_set_attribute_level',
+          'relationships_search_links',
+          'attribute_groups_search',
         ];
         for (const tool of expectedTools) {
           if (!result.tools.find((t) => t.name === tool)) {
