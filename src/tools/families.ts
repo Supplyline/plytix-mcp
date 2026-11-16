@@ -5,6 +5,7 @@
  * Useful for understanding inheritance structure and attribute assignments.
  */
 
+import { changeFamilyLevel, familyLevel } from '../family-levels.js';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PlytixClient } from '../client.js';
@@ -167,13 +168,14 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
   // families_link_attribute - Link one or more attributes
   // ─────────────────────────────────────────────────────────────
 
-  registerTool<{ family_id: string; attribute_labels: string[] }>(
+  registerTool<{ family_id: string; attribute_labels: string[]; level?: z.infer<typeof familyLevel> }>(
     server,
     'families_link_attribute',
     {
       title: 'Link Attributes to Family',
       description: 'Link attributes to a family.',
       inputSchema: {
+        level: familyLevel.optional(),
         family_id: z.string().min(1).describe('The product family ID'),
         attribute_labels: z
           .array(z.string())
@@ -181,8 +183,9 @@ export function registerFamilyTools(server: McpServer, client: PlytixClient) {
           .describe('Attribute labels to link to the family'),
       },
     },
-    async ({ family_id, attribute_labels }) => {
+    async ({ family_id, attribute_labels, level }) => {
       try {
+        if (level !== undefined) return await changeFamilyLevel(client, family_id, attribute_labels, level, 'link');
         await client.linkFamilyAttributes(family_id, attribute_labels);
 
         return {

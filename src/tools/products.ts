@@ -1,3 +1,4 @@
+import { projectSearch } from '../search-projection.js';
 import {
   PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
   PRODUCT_GET_DESCRIPTION,
@@ -300,6 +301,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
 
   registerTool<{
     attributes?: string[];
+    response_mode?: 'projected';
     filters?: unknown[];
     pagination?: { page: number; page_size: number };
     sort?: unknown;
@@ -310,6 +312,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
       title: 'Search Products',
       description: 'Search products with filters.',
       inputSchema: {
+        response_mode: z.literal('projected').optional(),
         attributes: z
           .array(z.string())
           .optional()
@@ -332,14 +335,16 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         if (Array.isArray(args.filters)) {
           args = { ...args, filters: normalizeProductSearchFilters(args.filters) };
         }
-        const result = await client.searchProducts(args as Parameters<typeof client.searchProducts>[0]);
+        const {response_mode, ...search} = args;
+        if (response_mode && (search.attributes?.length ?? 0) > 50) throw new Error('At most 50 fields');
+        const result = await client.searchProducts(search as Parameters<typeof client.searchProducts>[0]);
 
         return {
           content: [
             {
               type: 'text',
               text: JSON.stringify(
-                {
+                response_mode ? projectSearch(result, search.attributes ?? []) : {
                   products: result.data,
                   pagination: result.pagination,
                   attributes_returned: result.attributes,

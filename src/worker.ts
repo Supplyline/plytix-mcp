@@ -21,6 +21,10 @@ import { normalizeProductSearchFilters, PRODUCT_SEARCH_FILTERS_DESCRIPTION } fro
 import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
+import { changeFamilyLevel, familyLevel, familyTools } from './family-levels.js';
+import { catalogReads } from './catalog-reads.js';
+import { toolAnnotations } from './tool-annotations.js';
+import { projectSearch } from './search-projection.js';
 import { validateAttributeValue } from './utils/validate-attribute.js';
 import { WORKER_INLINE_MAX_BYTES, WORKER_INLINE_MAX_ITEMS } from './batch/helpers.js';
 import { BULK_DEFAULT_WAIT_TIMEOUT_MS, BULK_MAX_ITEMS, BulkSubmitError } from './batch/bulk.js';
@@ -61,7 +65,8 @@ import {
 } from './protocol.js';
 
 /** Self-reported identity, echoed in `initialize`, `server/discover` and modern results. */
-const SERVER_INFO = { name: 'plytix-mcp', version: '0.3.3' } as const;
+import { version as packageVersion } from '../package.json';
+const SERVER_INFO = { name: 'plytix-mcp', version: packageVersion } as const;
 
 /**
  * Methods dispatchable on the *modern* path.
@@ -493,7 +498,9 @@ function renderAuthorizePage(params: {
 // Tool Definitions
 // ─────────────────────────────────────────────────────────────
 
+const catalogTools = [...familyTools, ...catalogReads];
 const TOOLS: ToolDefinition[] = [
+  ...catalogTools.map(tool => tool.definition),
   {
     name: 'products_lookup',
     description: 'Find the best product match for an identifier.',
@@ -558,6 +565,7 @@ const TOOLS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        response_mode: {type: 'string', enum: ['projected']},
         attributes: {
           type: 'array',
           items: { type: 'string' },
@@ -692,6 +700,7 @@ const TOOLS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        level: {type: 'string', enum: ATTRIBUTE_LEVELS},
         family_id: { type: 'string', description: 'The product family ID' },
         attribute_labels: {
           type: 'array',
@@ -1491,6 +1500,7 @@ const TOOLS: ToolDefinition[] = [
 // ─────────────────────────────────────────────────────────────
 
 const toolHandlers: Record<string, ToolHandler> = {
+  ...Object.fromEntries(catalogTools.map(tool => [tool.definition.name, tool.run])),
   async products_lookup(args, client) {
     const lookup = new WorkerPlytixLookup(client);
     const identifier = args.identifier as string;
@@ -1633,7 +1643,12 @@ const toolHandlers: Record<string, ToolHandler> = {
       args = { ...args, filters: normalizeProductSearchFilters(args.filters) };
     }
 
-    const result = await client.searchProducts(args as Record<string, unknown>);
+    const {response_mode, ...search} = args;
+    if (response_mode !== undefined) {
+      if (response_mode !== 'projected' || (search.attributes !== undefined && (!Array.isArray(search.attributes) || search.attributes.length > 50 || !search.attributes.every(field => typeof field === 'string')))) throw new Error('Invalid projection');
+    }
+    const result = await client.searchProducts(search);
+    if (response_mode) return {content: [{type: 'text', text: JSON.stringify(projectSearch(result, (search.attributes ?? []) as string[]))}]};
 
     return {
       content: [
@@ -1783,6 +1798,7 @@ const toolHandlers: Record<string, ToolHandler> = {
     const familyId = args.family_id as string;
     const attributeLabels = args.attribute_labels as string[];
 
+    if (args.level !== undefined) return changeFamilyLevel(client, familyId, attributeLabels, familyLevel.parse(args.level), 'link');
     await client.linkFamilyAttributes(familyId, attributeLabels);
 
     return {
@@ -3014,7 +3030,7 @@ async function handleMcpRequest(
           jsonrpc: '2.0',
           id: id ?? null,
           result: {
-            tools: TOOLS,
+            tools: TOOLS.map(tool => ({...tool, annotations: toolAnnotations(tool.name)})),
           },
         };
       }
@@ -3547,7 +3563,7 @@ export default {
       return new Response(
         JSON.stringify({
           name: 'plytix-mcp',
-          version: '0.3.3',
+          version: packageVersion,
           description: 'Remote MCP server for Plytix PIM',
           endpoints: {
             mcp: '/mcp',

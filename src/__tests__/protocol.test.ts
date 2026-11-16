@@ -1,3 +1,4 @@
+import { version as packageVersion } from '../../package.json';
 import { describe, it, expect } from 'vitest';
 import worker from '../worker.js';
 import {
@@ -526,7 +527,7 @@ describe('worker: modern era', () => {
     expect(json.result.resultType).toBe('complete');
     expect(json.result._meta[META_SERVER_INFO]).toEqual({
       name: 'plytix-mcp',
-      version: '0.3.3',
+      version: packageVersion,
     });
   });
 
