@@ -9,6 +9,7 @@
  * preserving runtime behavior.
  */
 
+import { toolAnnotations } from '../tool-annotations.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ZodRawShape } from 'zod';
 
@@ -35,5 +36,5 @@ export function registerTool<TArgs extends Record<string, unknown>>(
 ): void {
   // Cast to any to prevent SDK from inferring the full Zod schema type tree
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (server.registerTool as any)(name, definition, handler);
+  (server.registerTool as any)(name, { ...definition, annotations: toolAnnotations(name) }, handler);
 }

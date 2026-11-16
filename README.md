@@ -98,7 +98,7 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
-The remote worker exposes 56 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
+The remote worker exposes 62 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
 ### Protocol versions
 
@@ -385,3 +385,13 @@ MIT License — see [LICENSE](LICENSE) file for details.
 - **Issues**: [GitHub Issues](https://github.com/Supplyline/plytix-mcp/issues)
 - **Plytix API**: [Plytix Documentation](https://docs.plytix.com/)
 - **MCP Protocol**: [Model Context Protocol](https://modelcontextprotocol.io/)
+
+## Catalog inspection and family levels
+
+On stdio and the Worker, use `families_get_attribute_level` with a family ID and attribute label. To preview an edit call `families_set_attribute_level` with the same identity, `level: "variant_level"`, `expected_level: "parent_level"` and `dry_run: true`. Execute with dry run off and check the returned outcome. Explicitly supplying a level to `families_link_attribute` resolves new links by ID. Review descendant product values separately before a migration.
+
+Use `relationships_get_link` for an exact source, destination and relationship type. For a reverse lookup pass `relationship_type_id` and `to_product_id` to `relationships_search_links`. Keep the filters and pass the returned `next` object as `cursor` until it is null. Each call reads at most one page of source products. Concurrent catalog edits may change page ordering. The V1 relationship filter requires a type for destination lookups and a quantity predicate (nonnegative quantities).
+
+Use `attribute_groups_search` and `attribute_groups_get` to inspect group membership. V1 documents whole-roster replacement and provides no proven conditional update for adding or removing one member. Those two writes remain open.
+
+Pass `response_mode: "projected"` and an explicit `attributes` array to `products_search` for per-field states and separate page, match and catalog counts. A native null is indeterminate in search. Use a by-ID read to establish its value.

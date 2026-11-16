@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-16
+
+Added family level queries and verified edits, source/type-scoped directed link search, exact link retrieval, attribute-group reads, tool-effect annotations and opt-in labeled product search results on both transports.
+
 ## [0.5.0] - 2026-10-28
 
 ### Added

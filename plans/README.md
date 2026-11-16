@@ -7,6 +7,10 @@ ahead (PRs #24–#27, the batch update/export feature, landed 2026-06-09). Recon
 same night against `fb8935e`. Each executor: read the plan fully before starting, honor
 its STOP conditions, and update your row when done.
 
+## Change orders for review
+
+[010 — Community MCP parity with the official Plytix beta](010-official-beta-capability-parity.md) requests two releases. The first covers family attribute levels, directed relationship lookup, group membership, tool annotations and search results. The second covers the remaining operations in the 75-tool beta baseline.
+
 ## Execution order & status
 
 | Plan | Title | Priority | Effort | Depends on | Status |
