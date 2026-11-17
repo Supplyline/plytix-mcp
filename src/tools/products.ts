@@ -1,3 +1,5 @@
+import { createProductWithLinks } from '../product-create.js';
+import { objectId } from '../catalog-tools.js';
 import { projectSearch } from '../search-projection.js';
 import {
   PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
@@ -536,6 +538,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
   // ─────────────────────────────────────────────────────────────
 
   registerTool<{
+    thumbnail_id?: string;
     sku: string;
     label?: string;
     status?: string;
@@ -549,6 +552,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
       title: 'Create Product',
       description: 'Create a product.',
       inputSchema: {
+        thumbnail_id: objectId.optional().describe('Existing asset to attach as the product thumbnail'),
         sku: z.string().min(1).describe('Product SKU (required, must be unique)'),
         label: z.string().optional().describe('Product label/name'),
         status: z.string().optional().describe('Product status'),
@@ -563,43 +567,9 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         asset_ids: z.array(z.string().min(1)).optional().describe('Asset IDs to link to this product'),
       },
     },
-    async ({ sku, label, status, attributes, category_ids, asset_ids }) => {
+    async (args) => {
       try {
-        const data: Parameters<typeof client.createProduct>[0] = { sku };
-        if (label !== undefined) data.label = label;
-        if (status !== undefined) data.status = status;
-        if (attributes !== undefined) data.attributes = attributes;
-        if (category_ids?.length) data.categories = category_ids.map((id) => ({ id }));
-        if (asset_ids?.length) data.assets = asset_ids.map((id) => ({ id }));
-
-        const result = await client.createProduct(data);
-        const created = result.data?.[0];
-
-        if (!created?.id) {
-          return {
-            content: [
-              { type: 'text', text: 'Product creation failed: no ID returned from API' },
-            ],
-            isError: true,
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                {
-                  success: true,
-                  id: created.id,
-                  created: created.created,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return await createProductWithLinks(client, args);
       } catch (error) {
         return {
           content: [

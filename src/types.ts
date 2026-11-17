@@ -88,6 +88,16 @@ export interface RateLimitConfig {
 
 export type ProductType = 'PARENT' | 'VARIANT' | 'STANDALONE';
 
+export interface ProductCreateData {
+  sku: string;
+  thumbnail?: { id: string };
+  label?: string;
+  status?: string;
+  attributes?: Record<string, unknown>;
+  categories?: Array<{ id: string }>;
+  assets?: Array<{ id: string }>;
+}
+
 export interface PlytixProduct {
   id: string;
   sku?: string;

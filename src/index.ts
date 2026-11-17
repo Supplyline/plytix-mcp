@@ -7,6 +7,8 @@
  */
 
 import 'dotenv/config';
+import { detailTools } from './catalog-detail.js';
+import { adminTools } from './catalog-admin.js';
 import { catalogReads } from './catalog-reads.js';
 import { familyTools } from './family-levels.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -56,7 +58,7 @@ async function main() {
   const client = new PlytixClient();
 
   // Register all tools
-  for (const tool of [...familyTools, ...catalogReads]) tool.register(server, client);
+  for (const tool of [...familyTools, ...catalogReads, ...adminTools, ...detailTools]) tool.register(server, client);
   registerProductTools(server, client);
   registerFamilyTools(server, client);
   registerAttributeTools(server, client);

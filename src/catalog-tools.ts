@@ -10,7 +10,7 @@ export interface CatalogClient {
   getFamilyAttributes(id: string): Promise<PlytixResult<PlytixFamilyAttribute>>;
   getRelationship(id: string): Promise<PlytixResult<PlytixRelationshipDefinition>>;
 }
-export const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Expected a Plytix ObjectId');
+export const objectId = z.string().regex(/^[a-fA-F0-9]{24}$/, 'Expected a Plytix ObjectId').toLowerCase();
 export const page = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1);
 export const pageSize = z.number().int().min(1).max(100).default(25);
 export const post = (body: unknown): RequestInit => ({method: 'POST', body: JSON.stringify(body)});
@@ -34,7 +34,7 @@ export function catalogTool<S extends z.ZodRawShape>(
     definition: {name, description, annotations, inputSchema: z.toJSONSchema(schema, {io: 'input'}) as {type: 'object'; properties: Record<string, unknown>}},
     run,
     register(server: McpServer, client: CatalogClient) {
-      registerTool(server, name, {description, inputSchema: shape}, args => run(args, client));
+      registerTool(server, name, {description, inputSchema: schema}, args => run(args, client));
     },
   };
 }

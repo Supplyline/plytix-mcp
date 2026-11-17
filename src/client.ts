@@ -18,6 +18,7 @@ import type {
   PlytixResult,
   PlytixSearchBody,
   PlytixProduct,
+  ProductCreateData,
   PlytixAsset,
   PlytixCategory,
   PlytixFamily,
@@ -807,14 +808,7 @@ export class PlytixClient {
    * Create a new product. Only `sku` is mandatory.
    * Cannot create new attributes, categories, or assets - must link existing ones.
    */
-  async createProduct(data: {
-    sku: string;
-    label?: string;
-    status?: string;
-    attributes?: Record<string, unknown>;
-    categories?: Array<{ id: string }>;
-    assets?: Array<{ id: string }>;
-  }): Promise<PlytixResult<PlytixProduct>> {
+  async createProduct(data: ProductCreateData): Promise<PlytixResult<PlytixProduct>> {
     return this.request<PlytixProduct>('/api/v2/products', {
       method: 'POST',
       body: JSON.stringify(data),

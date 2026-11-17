@@ -215,3 +215,17 @@ describe('session cap', () => {
     expect(safety.authorizeDelete(TOOL, OTHER_TARGET, stranded).ok).toBe(true);
   });
 });
+
+
+it('reserves the last delete slot during submission until a definitive rejection', async () => {
+  process.env.PLYTIX_MCP_MAX_DELETES = '1';
+  const safety = await loadSafety();
+  const slot = safety.reserveDeleteSlot();
+  expect(slot.ok).toBe(true);
+  if (!slot.ok) return;
+  expect(safety.reserveDeleteSlot().ok).toBe(false);
+  slot.releaseUnused();
+  slot.releaseUnused();
+  expect(safety.getSessionDeleteCount()).toBe(0);
+  expect(safety.reserveDeleteSlot().ok).toBe(true);
+});
