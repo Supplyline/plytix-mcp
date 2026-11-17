@@ -1,6 +1,7 @@
 # Change order 010 — Community MCP parity with the official Plytix beta
 
-**Status** · Proposed for maintainer review  
+**Status** · Release 1 landed in [#52](https://github.com/Supplyline/plytix-mcp/pull/52). Release 2 implements the available API-backed scope in 0.7.0. The [75-operation coverage record](../docs/official-beta-parity.md) tracks open parity and live-write verification.
+
 **Requested outcome** · Let community MCP users perform the catalog operations exposed by the November 2026 official beta, starting with the operations that previously required custom REST code.  
 **Baseline** · November 16, 2026. Community 0.5.0 at `68b7d34190fa3bf1e114f96a7aa202a15880bd07`, verified against remote main.  
 **Delivery** · Two independently reviewable releases. The first addresses known workflow problems. The second closes the remaining catalog-operation and field-level gaps. This document requests engineering work. Production catalog changes and deployment are separate decisions.

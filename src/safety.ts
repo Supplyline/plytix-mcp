@@ -253,6 +253,21 @@ export function recordDelete(): number {
   return sessionDeleteCount;
 }
 
+/** Reserve capacity before sending a mutation. An ambiguous submission may have deleted its target. */
+export function reserveDeleteSlot(): { ok: false; reason: string } | { ok: true; releaseUnused(): void } {
+  const cap = sessionCapAvailable();
+  if (!cap.ok) return cap;
+  recordDelete();
+  let held = true;
+  return {
+    ok: true,
+    releaseUnused() {
+      if (held) sessionDeleteCount--;
+      held = false;
+    },
+  };
+}
+
 /** Deletes performed by this process, for inclusion in success responses. */
 export function getSessionDeleteCount(): number {
   return sessionDeleteCount;

@@ -7,6 +7,8 @@ const reads = new Set([
   'assets_search', 'assets_list', 'categories_search', 'categories_list', 'variants_list',
   'relationships_get', 'relationships_search', 'relationships_filters', 'families_get_attribute_level',
   'relationships_get_link', 'relationships_search_links', 'attribute_groups_search', 'attribute_groups_get',
+  'categories_get', 'categories_get_membership', 'asset_categories_get', 'asset_categories_search',
+  'products_get_by_sku', 'attributes_get_by_id', 'attributes_search', 'families_search_attributes',
 ]);
 const local = new Set(['identifier_detect', 'identifier_normalize', 'match_score']);
 

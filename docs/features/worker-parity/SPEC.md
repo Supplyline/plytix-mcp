@@ -6,8 +6,8 @@
 
 The Cloudflare Worker MCP server now exposes the full API-backed tool surface.
 
-- `stdio`: 67 tools
-- `remote worker`: 62 tools
+- `stdio`: 88 tools
+- `remote worker`: 83 tools
 - intentional remote omissions: `identifier_detect`, `identifier_normalize`, `match_score`,
   `products_batch_update_manifest`, `products_batch_export_to_file`
 

@@ -98,7 +98,7 @@ npx mcp-remote https://plytix-mcp.your-subdomain.workers.dev/mcp \
   --header "X-Plytix-API-Password: YOUR_API_PASSWORD"
 ```
 
-The remote worker exposes 62 tools. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
+Release 0.7.0 exposes 83 tools in the Worker and 88 over stdio. It intentionally omits local-only utilities and filesystem tools: `identifier_detect`, `identifier_normalize`, `match_score`, `products_batch_update_manifest`, and `products_batch_export_to_file`.
 
 ### Protocol versions
 
@@ -390,8 +390,22 @@ MIT License — see [LICENSE](LICENSE) file for details.
 
 On stdio and the Worker, use `families_get_attribute_level` with a family ID and attribute label. To preview an edit call `families_set_attribute_level` with the same identity, `level: "variant_level"`, `expected_level: "parent_level"` and `dry_run: true`. Execute with dry run off and check the returned outcome. Explicitly supplying a level to `families_link_attribute` resolves new links by ID. Review descendant product values separately before a migration.
 
-Use `relationships_get_link` for an exact source, destination and relationship type. For a reverse lookup pass `relationship_type_id` and `to_product_id` to `relationships_search_links`. Keep the filters and pass the returned `next` object as `cursor` until it is null. Each call reads at most one page of source products. Concurrent catalog edits may change page ordering. The V1 relationship filter requires a type for destination lookups and a quantity predicate (nonnegative quantities).
+Use `relationships_get_link` for an exact source, destination and relationship type. For reverse lookup, pass `to_product_id` to `relationships_search_links`. Include `relationship_type_id` to narrow the search. Keep the filters and pass the returned `next` object as `cursor` until it is null, even after an empty page. With no type or source, each call visits at most one definition and one source product. Reverse lookups use the V1 index for nonnegative quantities. Concurrent catalog edits may change page ordering.
 
 Use `attribute_groups_search` and `attribute_groups_get` to inspect group membership. V1 documents whole-roster replacement and provides no proven conditional update for adding or removing one member. Those two writes remain open.
 
 Pass `response_mode: "projected"` and an explicit `attributes` array to `products_search` for per-field states and separate page, match and catalog counts. A native null is indeterminate in search. Use a by-ID read to establish its value.
+
+## Catalog administration in 0.7.0
+
+| Task | Community tool and input |
+|---|---|
+| Inspect a SKU | `products_get_by_sku` accepts an exact `sku` and optional `attribute_labels`. It checks the SKU again on canonical ID readback. |
+| Inspect definitions and family associations | Use `attributes_get_by_id`, `attributes_search` and `families_search_attributes`. Association pages return direct levels and a continuation cursor. |
+| Upload a DAM file | Pass a public HTTP(S) `url` or raw base64 `content` plus `filename` to `assets_create`. The encoded text limit is 4 MiB. The response identifies the created asset and its verification outcome. |
+| Attach a thumbnail when creating a product | Pass an existing asset's ID as `thumbnail_id` to `products_create`; the server reads the product back and checks the linked asset. |
+| Maintain categories | `asset_categories_search/get/create/update/delete` cover the DAM tree. `categories_get` reads a product category and `categories_get_membership` looks up its association with a product. |
+| Maintain catalog definitions | `attribute_groups_create/update` accept name and zero-based order. `relationship_types_create/update` accept display name. `families_update` renames a family. |
+| Remove catalog records | `families_delete`, `assets_delete`, `asset_categories_delete`, `attribute_groups_delete` and `relationship_types_delete` accept `id`. Request `dry_run: true`, review dependencies, then submit the returned `confirm_token`. Uncertain submissions count toward the current process cap. |
+
+If a write returns `unverified`, use its canonical ID to reconcile before submitting again. With a lost create response, search by the identifying input first. The coverage table records supported fields, open operations and upstream dependencies for each official tool. [Official beta coverage](docs/official-beta-parity.md)

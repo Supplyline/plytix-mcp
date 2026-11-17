@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-16
+
+- Added 21 tools shared by stdio and the Worker for DAM uploads and categories, catalog definition administration, exact SKU and attribute reads, direct family association search, and guarded deletion.
+- Added global and destination-only directed relationship traversal using bounded cursors. Added optional verified thumbnail linking on product creation.
+- Added a [75-operation coverage table](docs/official-beta-parity.md) for the official beta, including field-level differences, native API dependencies and verification scope. This release exposes 88 stdio and 83 Worker tools.
+
 ## [0.6.0] - 2026-11-16
 
 Added family level queries and verified edits, source/type-scoped directed link search, exact link retrieval, attribute-group reads, tool-effect annotations and opt-in labeled product search results on both transports.

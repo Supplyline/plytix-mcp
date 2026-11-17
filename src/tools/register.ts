@@ -11,12 +11,12 @@
 
 import { toolAnnotations } from '../tool-annotations.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ZodRawShape } from 'zod';
+import type { ZodRawShape, ZodObject } from 'zod';
 
 export interface ToolDefinition {
   title?: string;
   description: string;
-  inputSchema: ZodRawShape;
+  inputSchema: ZodRawShape | ZodObject;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { createProductWithLinks, type CreateProductInput } from './product-create.js';
 import {
   PRODUCT_GET_MAX_ATTRIBUTE_LABELS,
   PRODUCT_GET_DESCRIPTION,
@@ -22,6 +23,8 @@ import { WorkerPlytixClient } from './worker-client.js';
 import { WorkerPlytixLookup } from './worker-lookup.js';
 import { stripAttributesPrefix } from './utils/attribute-labels.js';
 import { changeFamilyLevel, familyLevel, familyTools } from './family-levels.js';
+import { detailTools } from './catalog-detail.js';
+import { adminTools } from './catalog-admin.js';
 import { catalogReads } from './catalog-reads.js';
 import { toolAnnotations } from './tool-annotations.js';
 import { projectSearch } from './search-projection.js';
@@ -498,7 +501,7 @@ function renderAuthorizePage(params: {
 // Tool Definitions
 // ─────────────────────────────────────────────────────────────
 
-const catalogTools = [...familyTools, ...catalogReads];
+const catalogTools = [...familyTools, ...catalogReads, ...adminTools, ...detailTools];
 const TOOLS: ToolDefinition[] = [
   ...catalogTools.map(tool => tool.definition),
   {
@@ -971,6 +974,7 @@ const TOOLS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        thumbnail_id: { type: 'string', pattern: '^[a-fA-F0-9]{24}$', description: 'Existing thumbnail asset ID' },
         sku: { type: 'string', description: 'Product SKU (required, must be unique)' },
         label: { type: 'string', description: 'Product label/name' },
         status: { type: 'string', description: 'Product status' },
@@ -2184,46 +2188,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
 
   async products_create(args, client) {
-    const sku = args.sku as string;
-    const label = args.label as string | undefined;
-    const status = args.status as string | undefined;
-    const attributes = args.attributes as Record<string, unknown> | undefined;
-    const categoryIds = args.category_ids as string[] | undefined;
-    const assetIds = args.asset_ids as string[] | undefined;
-
-    const data: Parameters<typeof client.createProduct>[0] = { sku };
-    if (label !== undefined) data.label = label;
-    if (status !== undefined) data.status = status;
-    if (attributes !== undefined) data.attributes = attributes;
-    if (categoryIds?.length) data.categories = categoryIds.map((id) => ({ id }));
-    if (assetIds?.length) data.assets = assetIds.map((id) => ({ id }));
-
-    const result = await client.createProduct(data);
-    const created = result.data?.[0];
-
-    if (!created?.id) {
-      return {
-        content: [{ type: 'text', text: 'Product creation failed: no ID returned from API' }],
-        isError: true,
-      };
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              success: true,
-              id: created.id,
-              created: created.created,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
+    return createProductWithLinks(client, args as unknown as CreateProductInput);
   },
 
   async products_update(args, client) {
