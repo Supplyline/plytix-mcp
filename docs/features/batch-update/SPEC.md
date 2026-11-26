@@ -163,7 +163,8 @@ Rules:
   ledger updates. It defaults off to keep large responses compact.
 
 `products_batch_update_manifest` also accepts `dry_run?: boolean` and
-`return_successes?: boolean`.
+`return_successes?: boolean`. Its receipt file always holds the success rows; `return_successes`
+only echoes them in the response.
 
 Dry run:
 

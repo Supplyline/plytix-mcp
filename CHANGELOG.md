@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- `products_batch_update_manifest` receipts now always carry the per-product success rows. `return_successes` only decides whether the rows are also echoed in the response, so a submit without the flag no longer leaves a caller's ledger unable to reconcile a landed chunk.
+
 ## [0.7.0] - 2026-11-16
 
 - Added 21 tools shared by stdio and the Worker for DAM uploads and categories, catalog definition administration, exact SKU and attribute reads, direct family association search, and guarded deletion.

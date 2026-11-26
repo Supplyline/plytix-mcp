@@ -746,7 +746,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         return_successes: z
           .boolean()
           .optional()
-          .describe('Include one success row per patched product for exact caller ledger updates'),
+          .describe('Echo one success row per patched product in the response. The receipt file always holds them'),
         write_receipt: z
           .boolean()
           .optional()
@@ -761,7 +761,7 @@ export function registerProductTools(server: McpServer, client: PlytixClient) {
         });
 
         return {
-          content: [{ type: 'text', text: JSON.stringify(manifestResponse(result, response_mode === 'compact'), null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(manifestResponse(result, response_mode === 'compact', return_successes === true), null, 2) }],
           ...(result.status === 'rejected' ? { isError: true } : {}),
         };
       } catch (error) {
