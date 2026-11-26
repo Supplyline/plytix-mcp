@@ -107,6 +107,27 @@ describe('retained compact manifests', () => {
     expect(compact).not.toHaveProperty('successes'); expect(compact).toHaveProperty('receipt_path');
     expect(manifestResponse(result)).toHaveProperty('successes');
   });
+  it('a plain submit keeps success rows in the receipt and out of the response', async () => {
+    const { manifest } = await fixture();
+    const batch = vi.fn().mockResolvedValue(outcome());
+    const result = await executeManifestUpdate({ batchUpdateProducts: batch }, manifest);
+    expect(batch.mock.calls[0][1]).toMatchObject({ returnSuccesses: true });
+    const receipt = JSON.parse(await readFile(result.receipt_path!, 'utf8'));
+    expect(receipt.result).toEqual(outcome());
+    const quiet = manifestResponse(result, false, false);
+    expect(quiet).not.toHaveProperty('successes');
+    expect(quiet).toMatchObject({ full_result_retained: true });
+    expect(quiet).not.toHaveProperty('response_mode');
+    expect(manifestResponse(result, false, true)).toHaveProperty('successes');
+  });
+  it('without a receipt, success rows are fetched only on request and never elided', async () => {
+    const { manifest } = await fixture();
+    const batch = vi.fn().mockResolvedValue(outcome());
+    const result = await executeManifestUpdate({ batchUpdateProducts: batch }, manifest, { writeReceipt: false });
+    expect(batch.mock.calls[0][1]).toMatchObject({ returnSuccesses: false });
+    expect(result.receipt_path).toBeUndefined();
+    expect(manifestResponse(result, false, false)).toBe(result);
+  });
   it('never drops successes when receipt persistence fails after a write', async () => {
     const { manifest, dir } = await fixture();
     const batch = vi.fn(async () => { await rm(dir, { recursive: true, force: true }); return outcome(); });

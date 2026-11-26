@@ -37,14 +37,18 @@ export async function executeManifestUpdate(
     await writeExclusiveFile(probe, 'receipt preflight\n');
     await unlink(probe);
   }
+  // A receipt always carries the success rows: a caller's ledger reconciles from it, and a
+  // receipt without them leaves a fully landed chunk unknown. `returnSuccesses` only decides
+  // whether the rows are also echoed in the response (see manifestResponse).
+  const keepsReceipt = options.writeReceipt !== false || options.requireReceipt === true;
   const result: ManifestResult = await client.batchUpdateProducts(manifest.items, {
     dryRun: options.dryRun === true,
-    returnSuccesses: options.returnSuccesses === true || options.compact === true || options.requireReceipt === true,
+    returnSuccesses: options.returnSuccesses === true || keepsReceipt,
     maxItems: MANIFEST_MAX_ITEMS,
     metadata: manifest.metadata,
     beforeMutation: options.beforeMutation,
   });
-  if (options.writeReceipt !== false || options.requireReceipt) {
+  if (keepsReceipt) {
     try {
       result.receipt_path = await writeBatchReceipt(manifestPath, result, {
         dryRun: options.dryRun === true,
@@ -58,9 +62,15 @@ export async function executeManifestUpdate(
   return result;
 }
 
-/** Elide successes only after the complete result is durable; failure falls back to full. */
-export function manifestResponse(result: ManifestResult, compact = false): unknown {
-  if (!compact || !result.receipt_path || result.receipt_error) return result;
+/**
+ * Elide successes only after the complete result is durable; failure falls back to full.
+ * `echoSuccesses: false` is a caller that did not ask for the rows: they stay in the receipt
+ * and out of the response, as before receipts always carried them.
+ */
+export function manifestResponse(result: ManifestResult, compact = false, echoSuccesses = true): unknown {
+  if ((!compact && echoSuccesses) || !result.receipt_path || result.receipt_error) return result;
   const { successes: _successes, ...summary } = result as ManifestResult & { successes?: unknown };
-  return { ...summary, response_mode: 'compact', full_result_retained: true };
+  return compact
+    ? { ...summary, response_mode: 'compact', full_result_retained: true }
+    : { ...summary, full_result_retained: true };
 }
